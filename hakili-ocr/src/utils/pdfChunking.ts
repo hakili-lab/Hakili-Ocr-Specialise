@@ -11,6 +11,7 @@
  * la rotation plutôt que d'en reconstruire de nouveaux).
  */
 import { PDFDocument } from 'pdf-lib';
+import { takeCachedPdfDoc } from './pdfDocCache';
 
 /**
  * Au-delà de ce nombre de pages, le PDF est envoyé par morceaux plutôt qu'en un seul POST —
@@ -41,8 +42,19 @@ export interface LoadedPdf {
   doc: PDFDocument;
 }
 
-/** Charge `file` et rapporte son nombre de pages — voir `LoadedPdf` pour pourquoi ce chargement est réutilisable. */
+/**
+ * Charge `file` et rapporte son nombre de pages — voir `LoadedPdf` pour pourquoi ce chargement
+ * est réutilisable. Si `file` est le fichier pivoté produit par `rotatePdfFile`
+ * (`fileTransform.ts`), le `PDFDocument` a déjà été chargé et muté pour appliquer la rotation :
+ * `pdfDocCache` permet de le réutiliser tel quel plutôt que de reparser les mêmes octets une
+ * seconde fois (coût réel sur un document de plusieurs centaines de pages).
+ */
 export async function loadPdf(file: File): Promise<LoadedPdf> {
+  const cachedDoc = takeCachedPdfDoc(file);
+  if (cachedDoc) {
+    return { pageCount: cachedDoc.getPageCount(), doc: cachedDoc };
+  }
+
   const bytes = await file.arrayBuffer();
   const doc = await PDFDocument.load(bytes);
   return { pageCount: doc.getPageCount(), doc };

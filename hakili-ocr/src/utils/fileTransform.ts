@@ -6,6 +6,7 @@
  *   côté backend), sans re-rasteriser le contenu
  */
 import { PDFDocument, degrees } from 'pdf-lib';
+import { cachePdfDoc } from './pdfDocCache';
 
 export type RotationAngle = 0 | 90 | 180 | 270;
 
@@ -56,7 +57,12 @@ export async function rotatePdfFile(
   }
 
   const rotatedBytes = await pdfDoc.save();
-  return new File([rotatedBytes as BlobPart], file.name, { type: 'application/pdf' });
+  const rotatedFile = new File([rotatedBytes as BlobPart], file.name, { type: 'application/pdf' });
+  // `pdfDoc` reste valide après `.save()` (qui ne fait que sérialiser un instantané) — le
+  // mettre en cache ici évite à `loadPdf` (pdfChunking.ts) de reparser ces mêmes octets
+  // juste après, quand ce fichier pivoté poursuit vers le flux d'envoi/chunking.
+  cachePdfDoc(rotatedFile, pdfDoc);
+  return rotatedFile;
 }
 
 /** Point d'entrée unique appelé par `PreviewScreen` — délègue selon `isPdf` vers l'une des deux stratégies ci-dessus. */

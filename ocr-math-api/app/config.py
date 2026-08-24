@@ -35,11 +35,30 @@ class Settings:
     # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
     # done/error). Défaut : 30 min.
     JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
-    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "4096"))
+    # Défaut aligné sur .env.example (8192, pas 4096) : une valeur trop basse risque de
+    # tronquer une réponse verbeuse (page avec un gros tableau) avant la fin du JSON —
+    # traité comme un échec (ValueError, voir claude_service.py), pas retenté automatiquement
+    # par le retry Anthropic (_create_message_with_retry) puisque ce n'est pas une erreur API.
+    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "8192"))
     # Nombre max d'appels Anthropic simultanés (sémaphore global, claude_service.py).
     # Protège contre le rate limit Anthropic (429) et les pics de coût lors du
     # traitement parallèle des pages d'un PDF (_run_pdf_job).
     ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "6"))
+    # Délai max (secondes) accordé à UNE tentative d'appel Anthropic avant de la
+    # considérer en échec — sans ça, un appel qui ne répond jamais monopoliserait
+    # indéfiniment une place du sémaphore ANTHROPIC_CONCURRENCY.
+    ANTHROPIC_REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("ANTHROPIC_REQUEST_TIMEOUT_SECONDS", "120"))
+    # Nombre de tentatives supplémentaires (après la première) pour une erreur
+    # transitoire (429, 5xx, connexion) — gérées nous-mêmes (claude_service.py,
+    # _create_message_with_retry) plutôt que par le retry interne du SDK, pour que
+    # l'attente de backoff entre deux tentatives libère la place du sémaphore au
+    # lieu de la monopoliser.
+    ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
+    # Délai de base (secondes) du backoff exponentiel entre deux tentatives —
+    # doublé à chaque tentative (1, 2, 4, 8...), plus un peu d'aléatoire (jitter)
+    # pour éviter que plusieurs pages en 429 en même temps ne retentent toutes au
+    # même instant.
+    ANTHROPIC_RETRY_BASE_DELAY_SECONDS: float = float(os.getenv("ANTHROPIC_RETRY_BASE_DELAY_SECONDS", "1"))
     # Origines autorisées par CORS, séparées par des virgules. Par défaut les
     # ports Vite en dev local ; à surcharger en déploiement (ex. l'origine du
     # frontend dockerisé) via la variable d'environnement ALLOWED_ORIGINS.

@@ -100,7 +100,7 @@ export default function App() {
         )}
         {state.currentScreen === 'loading' && (
           <div className="h-full flex items-center justify-center">
-            <LoadingScreen isError={isError} error={error} progress={progress} />
+            <LoadingScreen isError={isError} error={error} />
           </div>
         )}
         {state.currentScreen === 'result' && state.transcriptionResult && (

@@ -1,24 +1,25 @@
 /**
  * components/LoadingScreen.tsx
- * Écran 3/4 : anneau de progression + ligne de statut + barre, avec deux
- * variantes selon que `progress` (page par page, PDF uniquement) est
- * disponible ou non — voir `ProgressRing`/`ProgressBar` plus bas pour le
- * détail de chaque variante. Gère aussi l'état d'erreur final (échec réseau
- * ou backend), avec un bouton pour revenir à l'écran de dépôt.
+ * Écran 3/4 : anneau de progression indéterminé (spinner) + ligne de statut
+ * animée + barre de balayage. Affiché tant qu'aucune page n'est encore prête
+ * — dès que la première page arrive, `App.tsx` bascule vers `ResultScreen`
+ * (`SET_RESULT`), qui a son propre indicateur "Transcription en cours…" pour
+ * les pages suivantes (voir `ResultHeader.tsx`). Volontairement pas de
+ * compteur "Page X / Y" ici : la progression réelle par page n'est pas
+ * affichée avant que la première page ne soit visible à l'écran.
+ * Gère aussi l'état d'erreur final (échec réseau ou backend), avec un bouton
+ * pour revenir à l'écran de dépôt.
  */
 import { useEffect, useState } from 'react';
-import { TranscribeError, type TranscriptionProgress } from '../hooks/useTranscribe';
+import { TranscribeError } from '../hooks/useTranscribe';
 import { useApp } from '../context/AppContext';
 
 interface LoadingScreenProps {
   isError: boolean;
   error: TranscribeError | null;
-  /** Progression réelle page par page — fournie uniquement pour un PDF multi-pages. */
-  progress: TranscriptionProgress | null;
 }
 
-// Étapes illustratives affichées en rotation — pas un vrai suivi du backend
-// (la progression réelle, quand elle existe, s'affiche au centre de l'anneau).
+// Étapes illustratives affichées en rotation — pas un vrai suivi du backend.
 const STEPS = [
   'Lecture des écritures…',
   'Repérage des tableaux…',
@@ -55,10 +56,9 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-export default function LoadingScreen({ isError, error, progress }: LoadingScreenProps) {
+export default function LoadingScreen({ isError, error }: LoadingScreenProps) {
   const { dispatch } = useApp();
   const reducedMotion = usePrefersReducedMotion();
-  const hasRealProgress = progress !== null && progress.pagesTotal > 0;
 
   const [stepIndex, setStepIndex] = useState(0);
   const [isStepVisible, setIsStepVisible] = useState(true);
@@ -106,7 +106,7 @@ export default function LoadingScreen({ isError, error, progress }: LoadingScree
 
   return (
     <div className="w-full h-full bg-surface-sunken trame-points flex flex-col items-center justify-center gap-6 p-8">
-      <ProgressRing hasRealProgress={hasRealProgress} progress={progress} />
+      <ProgressRing />
 
       <div className="h-5 flex items-center justify-center">
         <span
@@ -120,35 +120,20 @@ export default function LoadingScreen({ isError, error, progress }: LoadingScree
         </span>
       </div>
 
-      <ProgressBar hasRealProgress={hasRealProgress} progress={progress} />
+      <ProgressBar />
     </div>
   );
 }
 
-type ProgressRingProps = {
-  hasRealProgress: boolean;
-  progress: TranscriptionProgress | null;
-};
-
-/*
- * PDF : arc plein qui se remplit proportionnellement aux pages traitées, avec
- * le compteur réel au centre. Image seule (pas de fraction pertinente) : arc
- * partiel qui tourne indéfiniment (spinner), icône document au centre à la
- * place du chiffre. Le ralenti CSS global (@media prefers-reduced-motion,
- * index.css) fige déjà l'un et l'autre sans logique supplémentaire ici.
- */
-function ProgressRing({ hasRealProgress, progress }: ProgressRingProps) {
-  const fraction = hasRealProgress && progress ? Math.min(progress.pagesDone / progress.pagesTotal, 1) : 0;
-  const dashOffset = RING_CIRCUMFERENCE * (1 - fraction);
-
+/** Arc partiel qui tourne indéfiniment (spinner), icône document au centre. */
+function ProgressRing() {
   return (
     <div className="relative shrink-0" style={{ width: RING_SIZE, height: RING_SIZE }}>
       <svg
         width={RING_SIZE}
         height={RING_SIZE}
         viewBox={`0 0 ${RING_SIZE} ${RING_SIZE}`}
-        className={hasRealProgress ? undefined : 'animate-loading-ring-spin'}
-        style={hasRealProgress ? { transform: 'rotate(-90deg)', transformOrigin: '50% 50%' } : undefined}
+        className="animate-loading-ring-spin"
       >
         <circle cx={RING_SIZE / 2} cy={RING_SIZE / 2} r={RING_RADIUS} fill="none" stroke="var(--color-line)" strokeWidth={RING_STROKE} />
         <circle
@@ -159,54 +144,28 @@ function ProgressRing({ hasRealProgress, progress }: ProgressRingProps) {
           stroke="var(--color-action)"
           strokeWidth={RING_STROKE}
           strokeLinecap="round"
-          strokeDasharray={hasRealProgress ? RING_CIRCUMFERENCE : `${RING_CIRCUMFERENCE * 0.25} ${RING_CIRCUMFERENCE}`}
-          strokeDashoffset={hasRealProgress ? dashOffset : 0}
-          style={hasRealProgress ? { transition: 'stroke-dashoffset 500ms var(--ease-out-hk)' } : undefined}
+          strokeDasharray={`${RING_CIRCUMFERENCE * 0.25} ${RING_CIRCUMFERENCE}`}
         />
       </svg>
       <div className="absolute inset-0 flex items-center justify-center">
-        {hasRealProgress && progress ? (
-          <span className="font-mono text-[18px] tabular-nums text-ink">
-            {progress.pagesDone}/{progress.pagesTotal}
-          </span>
-        ) : (
-          <svg width="24" height="24" viewBox="0 0 40 40" fill="none" stroke="var(--color-ink-muted)" strokeWidth={1.5}>
-            <path d="M10 4h14l6 6v24a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
-            <path d="M24 4v6h6" />
-            <line x1="12" y1="20" x2="26" y2="20" />
-            <line x1="12" y1="25" x2="26" y2="25" />
-            <line x1="12" y1="30" x2="20" y2="30" />
-          </svg>
-        )}
+        <svg width="24" height="24" viewBox="0 0 40 40" fill="none" stroke="var(--color-ink-muted)" strokeWidth={1.5}>
+          <path d="M10 4h14l6 6v24a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+          <path d="M24 4v6h6" />
+          <line x1="12" y1="20" x2="26" y2="20" />
+          <line x1="12" y1="25" x2="26" y2="25" />
+          <line x1="12" y1="30" x2="20" y2="30" />
+        </svg>
       </div>
     </div>
   );
 }
 
-type ProgressBarProps = {
-  hasRealProgress: boolean;
-  progress: TranscriptionProgress | null;
-};
-
-/*
- * PDF : remplissage proportionnel, en phase avec l'anneau. Image seule :
- * remplissage indéterminé, un segment qui balaie la piste de gauche à droite
+/**
+ * Remplissage indéterminé : un segment qui balaie la piste de gauche à droite
  * puis revient (cf. keyframes hk-loading-bar-sweep, index.css), en boucle
- * jusqu'à la fin réelle du traitement.
+ * jusqu'à ce que la première page soit prête.
  */
-function ProgressBar({ hasRealProgress, progress }: ProgressBarProps) {
-  if (hasRealProgress && progress) {
-    const fraction = Math.min(progress.pagesDone / progress.pagesTotal, 1);
-    return (
-      <div className="h-[3px] rounded-full overflow-hidden bg-line" style={{ width: BAR_WIDTH }}>
-        <div
-          className="h-full bg-action"
-          style={{ width: `${Math.round(fraction * 100)}%`, transition: 'width 500ms var(--ease-out-hk)' }}
-        />
-      </div>
-    );
-  }
-
+function ProgressBar() {
   return (
     <div className="relative h-[3px] rounded-full overflow-hidden bg-line" style={{ width: BAR_WIDTH }}>
       <div className="absolute inset-y-0 w-[30%] bg-action rounded-full animate-loading-bar-sweep" />

@@ -7,6 +7,7 @@ Reprend fidèlement la logique du script ocr_math_claude.py original.
 import asyncio
 import json
 import logging
+import random
 import re
 from functools import lru_cache
 
@@ -24,9 +25,22 @@ def _get_client() -> anthropic.AsyncAnthropic:
     """
     Client Anthropic asynchrone, réutilisé entre tous les appels (connexions HTTP
     gardées en keep-alive) au lieu d'en recréer un à chaque page transcrite.
+
+    `max_retries=0` désactive le retry automatique du SDK : les tentatives sont
+    gérées nous-mêmes dans `_create_message_with_retry`, pour que l'attente de
+    backoff entre deux tentatives se fasse HORS du sémaphore de concurrence
+    (`_get_semaphore`) — avec le retry interne du SDK, cette attente se produirait
+    à l'intérieur d'un seul `await client.messages.create(...)`, donc à l'intérieur
+    du `async with` qui tient le sémaphore, monopolisant une place pendant tout le
+    backoff. `timeout` borne la durée d'UNE tentative, pour qu'un appel qui ne
+    répond jamais ne bloque pas indéfiniment cette même place.
     """
     settings = get_settings()
-    return anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return anthropic.AsyncAnthropic(
+        api_key=settings.ANTHROPIC_API_KEY,
+        max_retries=0,
+        timeout=settings.ANTHROPIC_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 @lru_cache
@@ -42,46 +56,43 @@ def _get_semaphore() -> asyncio.Semaphore:
     """
     return asyncio.Semaphore(get_settings().ANTHROPIC_CONCURRENCY)
 SYSTEM_PROMPT = (
-    "Tu es un expert OCR spécialisé dans l'analyse de documents manuscrits : copies de "
-    "mathématiques, papiers administratifs et documents comptables (tableaux, formulaires, "
-    "relevés). Produis une transcription structurée en Markdown, formules en LaTeX ($...$ ou "
-    "$$...$$).\n\n"
-    "RATURES : ignore complètement ratures, gribouillages, taches d'encre, calculs biffés, "
-    "notes illisibles ou barrées. Ne transcris que le contenu final propre et lisible ; si une "
-    "formule est partiellement raturée, transcris la partie visible et baisse la confiance.\n\n"
-    "FORMAT : Markdown standard (gras **...**, listes) ; LaTeX inline $...$ (ex: $f(x)=x^2$), "
-    "display $$...$$ ; pas de blocs ```markdown, texte brut uniquement.\n\n"
+    "Tu es un expert OCR spécialisé dans l'analyse de documents administratifs manuscrits "
+    "ou imprimés (tableaux, formulaires, relevés, listes). Produis une transcription "
+    "structurée en Markdown.\n\n"
+    "RATURES : ignore complètement ratures, gribouillages, taches d'encre, mentions biffées "
+    "ou notes illisibles. Ne transcris que le contenu final propre et lisible ; si un passage "
+    "est partiellement raturé, transcris la partie visible et baisse la confiance.\n\n"
+    "FORMAT : Markdown standard (gras **...**, listes) ; pas de blocs ```markdown, texte brut "
+    "uniquement.\n\n"
     "CONTENU INCERTAIN : entoure de ==...== tout contenu dont tu doutes de la lecture exacte, "
-    "même un seul caractère — chiffre, lettre, symbole, mot ou expression entière, y compris "
-    "À L'INTÉRIEUR d'une formule $...$. N'utilise PAS ce marqueur pour une rature (ignorée, pas "
-    "transcrite) ni pour une phrase entière sans raison précise. Ex : \"Le ==résultat== est "
-    "$x = ==3==$\", \"$a^{==n==}$\".\n\n"
+    "même un seul caractère — chiffre, lettre, symbole, mot ou nombre entier. N'utilise PAS ce "
+    "marqueur pour une rature (ignorée, pas transcrite) ni pour une phrase entière sans raison "
+    "précise. Ex : \"Nom : ==Boubacar==\", \"Montant : ==1 250==\".\n\n"
     "TABLEAUX : un bloc par ligne de données, jamais un bloc pour tout le tableau. Chaque "
     "bloc-ligne répète l'en-tête + séparateur (|---|---|) suivis de sa seule ligne de données, "
     "avec son propre id, label (\"Tableau - Ligne N\"), bbox (limitée à cette ligne) et "
     "confidence. N'ajoute PAS de colonne confiance toi-même (ajoutée automatiquement par le "
     "système) — ne transcris que les colonnes réellement présentes.\n\n"
-    "ANNOTATION EN COULEUR DIFFÉRENTE — UNIQUEMENT pour les tableaux de papiers "
-    "administratifs/comptables (jamais pour les tableaux d'exercices de mathématiques) : si une "
-    "cellule porte, en plus du texte d'origine, une écriture manuscrite dans une couleur "
-    "nettement différente (souvent rouge vs. texte d'origine noir/bleu), parfois débordant de "
-    "la cellule — ce n'est ni une incertitude (==...==) ni une rature, le texte est lisible et "
-    "doit être conservé. Ajoute alors une colonne supplémentaire \"Annotation\" à la fin de CE "
-    "tableau (cellule vide sur les lignes sans annotation), et transcris la cellule d'origine "
-    "SANS cette écriture — ne les mélange jamais dans la même cellule. N'ajoute cette colonne "
-    "que si au moins une ligne du tableau en a besoin.\n\n"
-    "Pour chaque bloc : 1) markdown valide (LaTeX pour les formules) ; 2) bbox en PIXELS "
-    "ABSOLUS entiers (x_min, y_min, x_max, y_max), origine en haut à gauche, x vers la droite, "
-    "y vers le bas — dimensions exactes données dans le message utilisateur, n'estime jamais de "
-    "fraction toi-même ; 3) confidence 0-100 ; 4) final_warning si des zones sont douteuses.\n\n"
+    "ANNOTATION EN COULEUR DIFFÉRENTE : si une cellule porte, en plus du texte d'origine, une "
+    "écriture manuscrite dans une couleur nettement différente (souvent rouge vs. texte "
+    "d'origine noir/bleu), parfois débordant de la cellule — ce n'est ni une incertitude "
+    "(==...==) ni une rature, le texte est lisible et doit être conservé. Ajoute alors une "
+    "colonne supplémentaire \"Annotation\" à la fin de CE tableau (cellule vide sur les lignes "
+    "sans annotation), et transcris la cellule d'origine SANS cette écriture — ne les mélange "
+    "jamais dans la même cellule. N'ajoute cette colonne que si au moins une ligne du tableau "
+    "en a besoin.\n\n"
+    "Pour chaque bloc : 1) markdown valide ; 2) bbox en PIXELS ABSOLUS entiers (x_min, y_min, "
+    "x_max, y_max), origine en haut à gauche, x vers la droite, y vers le bas — dimensions "
+    "exactes données dans le message utilisateur, n'estime jamais de fraction toi-même ; "
+    "3) confidence 0-100 ; 4) final_warning si des zones sont douteuses.\n\n"
     "Réponds UNIQUEMENT avec un objet JSON valide, sans texte avant ou après, au format :\n"
     "{\n"
     '  "blocks": [\n'
     "    {\n"
     '      "id": 1,\n'
-    '      "label": "Exercice 1 - Question a",\n'
-    '      "markdown": "**a)** Résoudre graphiquement $f(x) = 1$. On obtient ==environ== $x = ==3==$",\n'
-    '      "bbox": { "x_min": 48, "y_min": 131, "x_max": 912, "y_max": 327 },\n'
+    '      "label": "En-tête du document",\n'
+    '      "markdown": "**Fiche de présence** — Classe : ==CM2==, Date : 12/03/2026",\n'
+    '      "bbox": { "x_min": 48, "y_min": 40, "x_max": 912, "y_max": 90 },\n'
     '      "confidence": 95\n'
     "    },\n"
     "    {\n"
@@ -99,19 +110,18 @@ SYSTEM_PROMPT = (
     '      "confidence": 70\n'
     "    }\n"
     "  ],\n"
-    '  "final_warning": "La zone en bas à droite est floue ; les indices de sommation sont incertains."\n'
+    '  "final_warning": "La zone en bas à droite est floue ; certains montants sont incertains."\n'
     "}"
 )
 
 def build_user_prompt(image_width: int, image_height: int) -> str:
     return (
-        f"Document manuscrit (mathématiques, administratif ou comptable), {image_width}x"
-        f"{image_height} pixels EXACTEMENT — utilise ces dimensions pour les bbox en pixels "
-        f"absolus, n'estime jamais de fraction toi-même. Renvoie UNIQUEMENT le JSON demandé, "
-        f"sans balises markdown ni explications, contenu en Markdown avec LaTeX ($...$/$$...$$) "
-        f"si le document en contient. Si un tableau administratif/comptable a une écriture en "
-        f"couleur différente sur une cellule, ajoute-lui une colonne \"Annotation\" dédiée — ne "
-        f"la mélange jamais à la cellule d'origine."
+        f"Document administratif manuscrit ou imprimé, {image_width}x{image_height} pixels "
+        f"EXACTEMENT — utilise ces dimensions pour les bbox en pixels absolus, n'estime jamais "
+        f"de fraction toi-même. Renvoie UNIQUEMENT le JSON demandé, sans balises markdown ni "
+        f"explications. Si un tableau a une écriture en couleur différente sur une cellule, "
+        f"ajoute-lui une colonne \"Annotation\" dédiée — ne la mélange jamais à la cellule "
+        f"d'origine."
     )
 
 def extract_json_from_markdown(text: str) -> str:
@@ -159,18 +169,55 @@ def inject_confidence_column(markdown: str, confidence: int) -> str:
 
 def describe_anthropic_error(exc: anthropic.APIError) -> str:
     """
-    Message destiné à l'utilisateur final pour une erreur API Anthropic. Cas
-    particulier détecté explicitement : crédit insuffisant sur le compte
-    Anthropic (400 invalid_request_error "credit balance is too low"), qui
-    renverrait sinon le JSON brut (illisible, non actionnable) tel quel à
-    l'utilisateur.
+    Message destiné à l'utilisateur final pour une erreur API Anthropic — classé
+    par type/`status_code` plutôt que de renvoyer le JSON brut de l'API
+    (illisible, non actionnable) ou un message générique qui masquerait la vraie
+    cause. Couvre aussi bien les erreurs non-retryables (échouent immédiatement,
+    voir `_is_retryable_anthropic_error`) que les erreurs transitoires qui ont
+    épuisé leurs tentatives dans `_create_message_with_retry` — dans les deux
+    cas, cette fonction est le seul endroit qui traduit l'exception en message
+    affiché côté frontend (transcription.py : `transcribe_image` et
+    `_process_page_and_track`), donc étendre la classification ici suffit à
+    couvrir les deux flux (image seule et pages PDF).
     """
-    if getattr(exc, "status_code", None) == 400 and "credit balance" in str(exc).lower():
+    status_code = getattr(exc, "status_code", None)
+
+    if status_code == 400 and "credit balance" in str(exc).lower():
         return (
             "Le service de transcription est temporairement indisponible : crédits "
             "insuffisants sur le compte Anthropic. Contactez l'administrateur pour "
             "recharger le compte."
         )
+    if isinstance(exc, anthropic.AuthenticationError):
+        return (
+            "Le service de transcription est mal configuré (clé API Anthropic invalide "
+            "ou expirée). Contactez l'administrateur."
+        )
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        return "Accès refusé par le service de transcription. Contactez l'administrateur."
+    if isinstance(exc, anthropic.RateLimitError):
+        return (
+            "Le service de transcription est actuellement surchargé (trop de demandes "
+            "simultanées). Réessayez dans quelques instants."
+        )
+    if isinstance(exc, (anthropic.InternalServerError, anthropic.OverloadedError)):
+        return (
+            "Le service de transcription est temporairement indisponible côté Anthropic. "
+            "Réessayez dans quelques instants."
+        )
+    if isinstance(exc, anthropic.APIConnectionError):
+        return (
+            "Impossible de contacter le service de transcription (problème réseau ou "
+            "délai dépassé). Réessayez."
+        )
+    if isinstance(exc, anthropic.RequestTooLargeError):
+        return "Le document envoyé est trop volumineux pour être traité par le service de transcription."
+    if isinstance(exc, anthropic.BadRequestError):
+        return f"La requête envoyée au service de transcription est invalide : {exc}"
+    # Erreur non classée explicitement (404, 409, 422...) : `str(exc)` reste le
+    # dernier recours plutôt qu'un message générique qui masquerait la cause —
+    # les erreurs de l'API Anthropic sont déjà des messages lisibles, pas des
+    # traces internes.
     return str(exc)
 
 
@@ -239,6 +286,59 @@ def parse_claude_response(text: str, image_width: int, image_height: int) -> OCR
         ) from exc
 
 
+def _is_retryable_anthropic_error(exc: anthropic.APIError) -> bool:
+    """
+    Erreurs transitoires qui valent la peine d'être retentées : limite de débit
+    (429), erreur serveur Anthropic (5xx, y compris 529 "overloaded"), ou
+    problème de connexion/délai dépassé (pas de réponse HTTP du tout — voir
+    `_get_client`, `timeout`). Testé sur `status_code` plutôt que sur le nom
+    exact de la classe d'exception — plus robuste aux détails de version du
+    SDK. Tout le reste (400, 401, 403, 404, 422...) est une erreur de fond
+    qu'une nouvelle tentative ne résoudrait pas.
+    """
+    if isinstance(exc, anthropic.APIConnectionError):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    return status_code == 429 or (status_code is not None and status_code >= 500)
+
+
+async def _create_message_with_retry(client: anthropic.AsyncAnthropic, **create_kwargs):
+    """
+    Enveloppe `client.messages.create(...)` d'une boucle de retry/backoff pour les
+    erreurs transitoires (voir `_is_retryable_anthropic_error`), en tenant le
+    sémaphore de concurrence UNIQUEMENT pendant l'appel réseau lui-même — le
+    `asyncio.sleep` de backoff entre deux tentatives se fait hors du `async
+    with`, pour ne pas monopoliser une place pendant que cette page patiente
+    avant de retenter (voir le docstring de `_get_client`, qui désactive le
+    retry interne du SDK au profit de cette boucle). Une erreur non-retryable,
+    ou la dernière tentative épuisée, est relevée telle quelle : les appelants
+    (`call_anthropic_ocr`, puis `_process_page_and_track`/`transcribe_image`)
+    continuent de la traiter exactement comme avant — même type d'exception,
+    `describe_anthropic_error` inchangé.
+    """
+    settings = get_settings()
+    max_attempts = settings.ANTHROPIC_MAX_RETRIES + 1
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with _get_semaphore():
+                return await client.messages.create(**create_kwargs)
+        except anthropic.APIError as exc:
+            if attempt >= max_attempts or not _is_retryable_anthropic_error(exc):
+                raise
+            # Backoff exponentiel (1, 2, 4, 8... × la base configurée) + jitter aléatoire,
+            # pour éviter que plusieurs pages tombées en 429 en même temps (même compte,
+            # même rate limit) ne retentent toutes exactement au même instant et ne
+            # retapent aussitôt un mur de 429.
+            delay = settings.ANTHROPIC_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            delay += random.uniform(0, delay * 0.3)
+            logger.warning(
+                "Appel Anthropic échoué (tentative %d/%d, %s) — nouvelle tentative dans %.1fs.",
+                attempt, max_attempts, exc.__class__.__name__, delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def call_anthropic_ocr(image_b64: str, media_type: str, image_width: int, image_height: int) -> OCRResult:
     """
     Envoie l'image (déjà en base64, déjà redimensionnée à image_width x image_height)
@@ -254,33 +354,41 @@ async def call_anthropic_ocr(image_b64: str, media_type: str, image_width: int, 
     client = _get_client()
 
     try:
-        async with _get_semaphore():
-            message = await client.messages.create(
-                model=settings.MODEL,
-                max_tokens=settings.MAX_TOKENS,
-                system=SYSTEM_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": image_b64,
-                                },
+        message = await _create_message_with_retry(
+            client,
+            model=settings.MODEL,
+            max_tokens=settings.MAX_TOKENS,
+            # `cache_control` marque ce bloc comme réutilisable côté serveur Anthropic :
+            # SYSTEM_PROMPT est identique à chaque appel (rien de variable par page/document
+            # n'y figure — les dimensions de l'image sont dans le message utilisateur), donc
+            # tant que le cache reste chaud (TTL 5 min, rafraîchi à chaque lecture), les
+            # appels suivants d'un même job PDF paient ~90% moins cher cette portion et
+            # bénéficient d'un temps de réponse réduit (le modèle n'a pas à la retraiter).
+            system=[
+                {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": image_b64,
                             },
-                            {
-                                "type": "text",
-                                "text": build_user_prompt(image_width, image_height),
-                            },
-                        ],
-                    }
-                ],
-            )
+                        },
+                        {
+                            "type": "text",
+                            "text": build_user_prompt(image_width, image_height),
+                        },
+                    ],
+                }
+            ],
+        )
     except anthropic.APIError as exc:
-        logger.exception("Erreur lors de l'appel à l'API Anthropic")
+        logger.exception("Erreur lors de l'appel à l'API Anthropic (toutes tentatives épuisées ou erreur non-retryable)")
         raise
 
     if message.stop_reason == "max_tokens":

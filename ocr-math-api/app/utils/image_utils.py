@@ -179,6 +179,28 @@ def resize_for_vision(raw_bytes: bytes, media_type: str) -> tuple[bytes, int, in
 
 # ─── PDF → Images ───────────────────────────────────────────────
 
+def count_pdf_pages(raw_bytes: bytes, max_pages: int | None = None) -> int:
+    """
+    Compte les pages d'un PDF sans rendre le moindre pixel — ouvre juste la
+    structure du document (table des pages), ce qui est nettement moins coûteux
+    que `convert_pdf_to_images`. Utilisé pour valider un budget de pages
+    (upload par morceaux, voir `routers/transcription.py`) avant de décider de
+    rasteriser, sans payer le coût du rendu pour cette seule validation. Lève la
+    même `ValueError` que `convert_pdf_to_images` si `max_pages` est dépassé.
+    """
+    import fitz  # PyMuPDF — import différé, voir convert_pdf_to_images
+
+    doc = fitz.open(stream=raw_bytes, filetype="pdf")
+    page_count = len(doc)
+    doc.close()
+
+    if max_pages is not None and page_count > max_pages:
+        raise ValueError(
+            f"PDF trop long ({page_count} pages). Limite acceptée : {max_pages} pages."
+        )
+    return page_count
+
+
 def convert_pdf_to_images(
     raw_bytes: bytes, dpi: int = 150, max_pages: int | None = None
 ) -> list[tuple[bytes, int, int]]:

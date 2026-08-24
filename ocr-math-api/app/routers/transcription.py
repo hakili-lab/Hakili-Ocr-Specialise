@@ -33,6 +33,7 @@ from app.utils.image_utils import (
     read_upload_with_limit,
     read_upload_with_byte_limit,
     convert_pdf_to_images,
+    count_pdf_pages,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,11 @@ async def _process_page_and_track(
         errors.append((page_number, detail))
     except Exception as exc:
         logger.error("Échec transcription page %d : %s", page_number, exc)
-        warnings.append((page_number, f"Page {page_number} : échec de la transcription."))
+        # Détail réel remonté jusqu'au frontend (via warnings/final_warning), pas seulement
+        # dans errors (qui n'est utilisé en interne que si TOUTES les pages échouent, voir
+        # _finalize_pdf_job) — pour qu'une page en échec pour une raison inattendue (pas une
+        # anthropic.APIError, ex. bug de parsing) ne remonte pas un message générique muet.
+        warnings.append((page_number, f"Page {page_number} : échec de la transcription — {exc}"))
         errors.append((page_number, str(exc)))
     else:
         if ocr_result.final_warning:
@@ -248,21 +253,62 @@ async def _run_pdf_job(job_id: str, page_images: list[tuple[bytes, int, int]]) -
         job.error = str(exc)
 
 
-async def _process_chunk_pages(job_id: str, page_images: list[tuple[bytes, int, int]], start_page_number: int) -> None:
+async def _process_chunk_pages(
+    job_id: str, chunk_bytes: bytes, start_page_number: int, page_count: int
+) -> None:
     """
-    Traite les pages d'UN morceau reçu par POST /pdf/{job_id}/chunk — même
-    motif que `_run_pdf_job` (un `asyncio.gather` sur `_process_page_and_track`
-    par page), mais écrit dans `job.results`/`job.warnings`/`job.errors`
-    (partagés entre TOUS les morceaux du job) plutôt que dans des listes
-    locales à cet appel : un job chunké accumule ses résultats au fil de
-    plusieurs vagues de tâches successives, une par morceau reçu, pas d'un
-    seul `gather` englobant tout le document. Décrémente `job.chunks_pending`
-    et tente la finalisation du job à sa propre fin — voir `_maybe_finalize_job`.
+    Traite les pages d'UN morceau reçu par POST /pdf/{job_id}/chunk. Rasterise
+    d'abord ce morceau elle-même (PyMuPDF, `asyncio.to_thread`) puis lance l'OCR
+    de ses pages — même motif que `_run_pdf_job` pour l'OCR (un `asyncio.gather`
+    sur `_process_page_and_track` par page), mais écrit dans
+    `job.results`/`job.warnings`/`job.errors` (partagés entre TOUS les morceaux
+    du job) plutôt que dans des listes locales à cet appel : un job chunké
+    accumule ses résultats au fil de plusieurs vagues de tâches successives,
+    une par morceau reçu, pas d'un seul `gather` englobant tout le document.
+
+    La rasterisation était auparavant faite dans `upload_pdf_chunk` lui-même,
+    avant de répondre au client — mais comme le client n'envoie le morceau N+1
+    qu'après avoir reçu la réponse du morceau N (contrat d'envoi séquentiel),
+    ce temps de rendu n'était jamais chevauché avec quoi que ce soit et
+    ajoutait une latence pure sur un gros document (des dizaines de secondes
+    cumulées sur ~25 morceaux pour 500 pages). En la déplaçant ici, dans la
+    tâche de fond, elle se chevauche avec l'envoi du morceau suivant — comme
+    l'était déjà le traitement OCR qui suit. `upload_pdf_chunk` ne fait plus
+    qu'une validation bon marché du nombre de pages (`count_pdf_pages`, qui
+    n'ouvre que la structure du PDF, sans rendu de pixel) avant de répondre.
+
+    Décrémente `job.chunks_pending` et tente la finalisation du job à sa
+    propre fin — voir `_maybe_finalize_job` — que la rasterisation ait réussi
+    ou non, pour qu'un morceau dont le rendu échoue ne bloque jamais
+    indéfiniment la finalisation du job.
     """
     job = get_job(job_id)
     if job is None:
         return
     try:
+        try:
+            page_images = await asyncio.to_thread(convert_pdf_to_images, chunk_bytes, dpi=150)
+        except Exception as exc:
+            # Le budget de pages a déjà été validé (count_pdf_pages, dans
+            # upload_pdf_chunk) avant que cette tâche ne soit créée — un échec ici
+            # est un problème de rendu (page corrompue, etc.), pas de dépassement
+            # de budget. Comme un seul appel `convert_pdf_to_images` couvre tout
+            # le morceau, on ne sait pas quelle(s) page(s) précise(s) ont fait
+            # échouer le rendu : toutes les pages annoncées pour ce morceau sont
+            # donc marquées en échec, avec le même traitement que
+            # `_process_page_and_track` applique à l'échec d'une page individuelle
+            # (warnings + errors + pages_done incrémenté), pour que la
+            # comptabilité de progression et la finalisation du job restent
+            # cohérentes.
+            logger.exception("Échec de la rasterisation en tâche de fond d'un morceau (job %s)", job_id)
+            message = f"Échec de la conversion de ce morceau : {exc}"
+            for offset in range(page_count):
+                page_number = start_page_number + offset
+                job.warnings.append((page_number, f"Page {page_number} : {message}"))
+                job.errors.append((page_number, message))
+                job.pages_done += 1
+            return
+
         await asyncio.gather(*(
             _process_page_and_track(start_page_number + i, img_bytes, job, job.results, job.warnings, job.errors)
             for i, (img_bytes, _w, _h) in enumerate(page_images)
@@ -438,15 +484,15 @@ async def upload_pdf_chunk(
     numérotation des pages, calculée côté serveur.
 
     `job.lock` rejette activement (409) tout morceau qui arriverait pendant
-    que le précédent est encore en cours de lecture/rasterisation pour ce
+    que le précédent est encore en cours de lecture/comptage de pages pour ce
     même job, plutôt que de le mettre en file d'attente silencieusement —
     un tel chevauchement signale une violation du contrat d'envoi séquentiel
     côté client (bug, double-clic, requête retentée) qu'il vaut mieux
-    remonter que masquer.
-
-    NOTE (étape 5 du plan) : cette version ne fait que la comptabilité —
-    réception, validation de budget, rasterisation — sans encore lancer le
-    traitement OCR des pages (étape 6).
+    remonter que masquer. Le lock ne couvre plus que la lecture des octets et
+    le comptage bon marché des pages (`count_pdf_pages`) — la rasterisation
+    et l'OCR, plus coûteux, se font hors lock dans la tâche de fond lancée
+    juste après (`_process_chunk_pages`), pour ne pas retarder la réponse au
+    client plus que nécessaire.
     """
     job = get_job(job_id)
     if job is None:
@@ -484,29 +530,35 @@ async def upload_pdf_chunk(
 
         remaining_pages = max(0, job.pages_expected - job.pages_received)
         try:
-            # convert_pdf_to_images (PyMuPDF) est un appel CPU synchrone ; via
-            # asyncio.to_thread pour ne pas geler la boucle d'événements.
-            page_images = await asyncio.to_thread(
-                convert_pdf_to_images, chunk_bytes, dpi=150, max_pages=remaining_pages
+            # count_pdf_pages n'ouvre que la structure du PDF (table des pages), sans
+            # rendre le moindre pixel — nettement moins coûteux que convert_pdf_to_images.
+            # Le vrai rendu (coûteux) est différé dans _process_chunk_pages, en tâche de
+            # fond, pour ne pas retarder la réponse HTTP : le client n'envoie le morceau
+            # N+1 qu'après avoir reçu cette réponse (contrat d'envoi séquentiel), donc tout
+            # ce qui reste dans ce bloc bloque directement l'envoi du morceau suivant.
+            page_count = await asyncio.to_thread(
+                count_pdf_pages, chunk_bytes, max_pages=remaining_pages
             )
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except Exception as exc:
-            logger.exception("Échec de la conversion d'un morceau PDF (job %s)", job_id)
+            logger.exception("Échec de la lecture d'un morceau PDF (job %s)", job_id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Impossible de convertir ce morceau : {exc}",
+                detail=f"Impossible de lire ce morceau : {exc}",
             ) from exc
 
         start_page_number = job.pages_received + 1
-        job.pages_received += len(page_images)
+        job.pages_received += page_count
         job.bytes_received += len(chunk_bytes)
         if is_last_chunk:
             job.upload_finalized = True
         job.chunks_pending += 1
         job.updated_at = time.time()
 
-    task = asyncio.create_task(_process_chunk_pages(job.job_id, page_images, start_page_number))
+    task = asyncio.create_task(
+        _process_chunk_pages(job.job_id, chunk_bytes, start_page_number, page_count)
+    )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 

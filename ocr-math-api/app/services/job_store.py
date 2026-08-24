@@ -62,10 +62,11 @@ class PDFJob:
     results: dict[int, PageResult] = field(default_factory=dict)
     warnings: list[tuple[int, str]] = field(default_factory=list)
     errors: list[tuple[int, str]] = field(default_factory=list)
-    # Empêche deux morceaux d'être lus/rasterisés en même temps pour un même
-    # job (cf. Danger 3 du plan : requêtes concurrentes/désordonnées) — tenu
-    # uniquement pendant la portion lecture+rasterisation du handler, pas
-    # pendant le traitement OCR qui suit. Sûr à construire ici via
+    # Empêche deux morceaux d'être lus/comptés en même temps pour un même job
+    # (cf. Danger 3 du plan : requêtes concurrentes/désordonnées) — tenu
+    # uniquement pendant la portion lecture + comptage bon marché des pages du
+    # handler (voir count_pdf_pages), pas pendant la rasterisation ni le
+    # traitement OCR qui suivent, déportés en tâche de fond. Sûr à construire ici via
     # `field(default_factory=asyncio.Lock)` : contrairement au sémaphore
     # global paresseux de claude_service.py (qui doit se lier après qu'une
     # boucle d'événements existe, potentiellement avant qu'aucune requête
