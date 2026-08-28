@@ -3,4 +3,5 @@
 -r requirements.txt
 
 # Utilisé par tests/test_transcribe.py (script manuel de test de l'API)
-requests>=2.32.0
+# Épinglé comme requirements.txt ; audité avec pip-audit le 2026-08-28.
+requests==2.34.2

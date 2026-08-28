@@ -24,7 +24,12 @@ RUN addgroup -g 1000 appuser \
     && adduser -D -u 1000 -G appuser appuser
 
 COPY --from=builder /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Template : l'entrypoint nginx substitue ${API_ORIGIN} au démarrage puis écrit
+# le résultat dans /etc/nginx/conf.d/default.conf (voir nginx.conf.template).
+# On retire le default.conf livré par l'image de base pour ne pas le laisser
+# traîner avant que l'entrypoint ne génère le nôtre.
+RUN rm -f /etc/nginx/conf.d/default.conf
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 
 # nginx doit pouvoir écrire son pid/cache/logs même en non-root
 RUN chown -R appuser:appuser /usr/share/nginx/html /var/cache/nginx /var/log/nginx /etc/nginx/conf.d \

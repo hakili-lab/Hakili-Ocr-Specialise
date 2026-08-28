@@ -16,6 +16,12 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL}
         VITE_APP_API_KEY: ${APP_API_KEY}
+    environment:
+      # Injecté au démarrage dans le `connect-src` du CSP (nginx.conf.template) :
+      # le navigateur doit pouvoir joindre le backend, sur une origine distincte.
+      # NGINX_ENVSUBST_FILTER limite la substitution à cette seule variable.
+      API_ORIGIN: ${VITE_API_BASE_URL}
+      NGINX_ENVSUBST_FILTER: API_ORIGIN
     ports:
       - "8021:80"
     depends_on:

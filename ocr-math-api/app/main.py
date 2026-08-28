@@ -29,7 +29,9 @@ settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
+    # Pas de `allow_credentials=True` : l'auth est par header (X-API-Key), jamais
+    # par cookie — le frontend fait des `fetch` sans `credentials: 'include'`
+    # (voir hakili-ocr/src/services/apiClient.ts). Revue sécurité 2026-08-28 (#7).
     allow_methods=["*"],
     allow_headers=["*"],
 )

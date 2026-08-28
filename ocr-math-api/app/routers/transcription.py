@@ -25,6 +25,7 @@ from app.models.schemas import (
 from app.security import verify_api_key
 from app.services.claude_service import call_anthropic_ocr, describe_anthropic_error
 from app.services.job_store import create_job, create_chunked_job, get_job, PDFJob
+from app.utils.errors import log_unexpected
 from app.utils.image_utils import (
     encode_bytes_to_base64,
     validate_content_type,
@@ -50,16 +51,17 @@ _background_tasks: set[asyncio.Task] = set()
 async def _process_single_image(raw_bytes: bytes, media_type: str):
     """
     Pipeline commun : orientation → resize → base64 → Claude.
-    `normalize_orientation`/`resize_for_vision` (PIL) sont des appels CPU
-    synchrones ; les passer par `asyncio.to_thread` évite qu'ils ne bloquent
-    la boucle d'événements pendant leur exécution (impact direct sur les
-    autres requêtes concurrentes, ex. le polling de statut d'un autre job PDF).
+    `normalize_orientation`/`resize_for_vision` (PIL) et `encode_bytes_to_base64`
+    sont des appels CPU synchrones ; les passer par `asyncio.to_thread` évite
+    qu'ils ne bloquent la boucle d'événements pendant leur exécution (impact
+    direct sur les autres requêtes concurrentes, ex. le polling de statut d'un
+    autre job PDF).
     """
     raw_bytes = await asyncio.to_thread(normalize_orientation, raw_bytes, media_type)
     raw_bytes, image_width, image_height = await asyncio.to_thread(
         resize_for_vision, raw_bytes, media_type
     )
-    image_b64 = encode_bytes_to_base64(raw_bytes)
+    image_b64 = await asyncio.to_thread(encode_bytes_to_base64, raw_bytes)
     ocr_result = await call_anthropic_ocr(image_b64, media_type, image_width, image_height)
     return ocr_result, image_b64, image_width, image_height
 
@@ -111,10 +113,11 @@ async def transcribe_image(file: UploadFile) -> TranscriptionResponse:
             detail=describe_anthropic_error(exc),
         ) from exc
     except Exception as exc:
-        logger.exception("Erreur inattendue lors de la transcription")
+        detail = log_unexpected(
+            logger, "Erreur inattendue lors de la transcription", "Erreur interne du serveur."
+        )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur inattendue : {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail
         ) from exc
 
     return TranscriptionResponse(success=True, result=ocr_result)
@@ -158,13 +161,15 @@ async def _process_page_and_track(
         warnings.append((page_number, f"Page {page_number} : {detail}"))
         errors.append((page_number, detail))
     except Exception as exc:
-        logger.error("Échec transcription page %d : %s", page_number, exc)
-        # Détail réel remonté jusqu'au frontend (via warnings/final_warning), pas seulement
-        # dans errors (qui n'est utilisé en interne que si TOUTES les pages échouent, voir
-        # _finalize_pdf_job) — pour qu'une page en échec pour une raison inattendue (pas une
-        # anthropic.APIError, ex. bug de parsing) ne remonte pas un message générique muet.
-        warnings.append((page_number, f"Page {page_number} : échec de la transcription — {exc}"))
-        errors.append((page_number, str(exc)))
+        # Erreur inattendue (pas une anthropic.APIError — ex. bug de parsing) : trace
+        # complète côté serveur, mais on ne remonte au frontend (via warnings/final_warning
+        # et via errors → job.error si TOUTES les pages échouent) que le *type* d'erreur,
+        # jamais son message — celui-ci peut contenir chemins, schéma SQLite ou bouts de
+        # l'entrée. L'échec reste visible et typé, pas muet, sans divulguer d'interne.
+        logger.exception("Échec transcription page %d", page_number)
+        label = f"échec de la transcription ({type(exc).__name__})"
+        warnings.append((page_number, f"Page {page_number} : {label}"))
+        errors.append((page_number, label))
     else:
         if ocr_result.final_warning:
             warnings.append((page_number, f"Page {page_number} : {ocr_result.final_warning}"))
@@ -247,10 +252,12 @@ async def _run_pdf_job(job_id: str, page_images: list[tuple[bytes, int, int]]) -
             for idx, (img_bytes, _orig_w, _orig_h) in enumerate(page_images)
         ))
         _finalize_pdf_job(job, job.results, job.warnings, job.errors)
-    except Exception as exc:
+    except Exception:
+        # `job.error` est renvoyé au frontend (PDFJobStatusResponse) : trace complète
+        # côté serveur, message générique au client — cf. app/utils/errors.py.
         logger.exception("Échec inattendu du job PDF %s", job_id)
         job.status = "error"
-        job.error = str(exc)
+        job.error = "Erreur interne du serveur pendant le traitement du document."
 
 
 async def _process_chunk_pages(
@@ -288,7 +295,7 @@ async def _process_chunk_pages(
     try:
         try:
             page_images = await asyncio.to_thread(convert_pdf_to_images, chunk_bytes, dpi=150)
-        except Exception as exc:
+        except Exception:
             # Le budget de pages a déjà été validé (count_pdf_pages, dans
             # upload_pdf_chunk) avant que cette tâche ne soit créée — un échec ici
             # est un problème de rendu (page corrompue, etc.), pas de dépassement
@@ -301,7 +308,7 @@ async def _process_chunk_pages(
             # comptabilité de progression et la finalisation du job restent
             # cohérentes.
             logger.exception("Échec de la rasterisation en tâche de fond d'un morceau (job %s)", job_id)
-            message = f"Échec de la conversion de ce morceau : {exc}"
+            message = "Échec de la conversion de ce morceau (fichier peut-être corrompu ou protégé)."
             for offset in range(page_count):
                 page_number = start_page_number + offset
                 job.warnings.append((page_number, f"Page {page_number} : {message}"))
@@ -377,7 +384,7 @@ async def start_pdf_transcription(file: UploadFile) -> PDFJobStartResponse:
         logger.exception("Échec de la conversion PDF")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Impossible de convertir le PDF : {exc}",
+            detail="Impossible de convertir le PDF. Le fichier est peut-être corrompu ou protégé.",
         ) from exc
 
     if not page_images:
@@ -545,7 +552,7 @@ async def upload_pdf_chunk(
             logger.exception("Échec de la lecture d'un morceau PDF (job %s)", job_id)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Impossible de lire ce morceau : {exc}",
+                detail="Impossible de lire ce morceau. Le fichier est peut-être corrompu ou protégé.",
             ) from exc
 
         start_page_number = job.pages_received + 1

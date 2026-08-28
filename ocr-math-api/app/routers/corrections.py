@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.models.schemas import CorrectionResponse, ErrorResponse
 from app.security import verify_api_key
 from app.services.correction_store import save_correction
+from app.utils.errors import log_unexpected
 from app.utils.image_utils import validate_content_type, read_upload_with_limit
 
 logger = logging.getLogger(__name__)
@@ -72,10 +73,11 @@ async def create_correction(
             error_description,
         )
     except Exception as exc:
-        logger.exception("Échec de l'enregistrement de la correction")
+        detail = log_unexpected(
+            logger, "Échec de l'enregistrement de la correction", "Erreur interne du serveur."
+        )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erreur inattendue : {exc}",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail
         ) from exc
 
     return CorrectionResponse(id=correction_id)

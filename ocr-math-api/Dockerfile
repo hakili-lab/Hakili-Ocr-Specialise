@@ -1,5 +1,9 @@
 # syntax=docker/dockerfile:1
-FROM python:3.12.7-slim-bookworm AS builder
+# Image de base épinglée par digest (pas seulement par tag) pour une build
+# entièrement reproductible — le contenu derrière un tag peut changer sans que
+# le tag bouge. Digest de l'index multi-arch de python:3.12.7-slim-bookworm,
+# relevé le 2026-08-28 (`docker buildx imagetools inspect`).
+FROM python:3.12.7-slim-bookworm@sha256:60d9996b6a8a3689d36db740b49f4327be3be09a21122bd02fb8895abb38b50d AS builder
 
 WORKDIR /app
 
@@ -10,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 
-FROM python:3.12.7-slim-bookworm
+FROM python:3.12.7-slim-bookworm@sha256:60d9996b6a8a3689d36db740b49f4327be3be09a21122bd02fb8895abb38b50d
 
 # Librairies système requises par WeasyPrint (app/services/pdf_export_service.py)
 # pour le layout/texte (Pango + HarfBuzz) et les polices utilisées par le

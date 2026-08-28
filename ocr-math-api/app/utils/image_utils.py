@@ -212,6 +212,12 @@ def convert_pdf_to_images(
     `ValueError` avant de rendre la moindre page — un PDF bien en dessous de
     la limite de taille peut quand même contenir des milliers de pages,
     déclenchant chacune un rendu PyMuPDF et un appel Claude payant.
+
+    Rendu séquentiel : PyMuPDF ne libère pas le GIL pendant `get_pixmap`, donc
+    un `ThreadPoolExecutor` n'apporte quasi rien (~10 %, mesuré) — un vrai
+    parallélisme demanderait un pool de *processus* (~3×), au prix du coût
+    d'IPC (le PDF sérialisé vers chaque worker) et de la gestion du cycle de
+    vie du pool. Volontairement pas fait tant que ce n'est pas nécessaire.
     """
     import fitz  # PyMuPDF — import différé pour ne pas rendre le démarrage du serveur dépendant de sa présence
 

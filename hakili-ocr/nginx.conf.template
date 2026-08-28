@@ -1,0 +1,48 @@
+# Template traité par l'entrypoint de l'image nginx (script
+# /docker-entrypoint.d/20-envsubst-on-templates.sh) au démarrage du conteneur :
+# seule ${API_ORIGIN} est substituée (NGINX_ENVSUBST_FILTER=API_ORIGIN dans
+# docker-compose.yml), les variables nginx `$uri`/`$host`/... sont laissées
+# telles quelles. Sortie écrite dans /etc/nginx/conf.d/default.conf.
+#
+# ${API_ORIGIN} = origine publique du backend (= VITE_API_BASE_URL), nécessaire
+# dans `connect-src` du CSP puisque le frontend (servi ici) et le backend sont
+# sur des origines différentes.
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ─── En-têtes de sécurité (revue sécurité 2026-08-28, item #8) ───────────
+    # `always` : appliqués aussi aux réponses d'erreur (4xx/5xx), pas seulement 2xx/3xx.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    # HSTS : ignoré par le navigateur sur une réponse HTTP en clair (donc sans
+    # effet ni risque en dev local), actif dès que le trafic public passe en
+    # HTTPS (terminaison TLS en amont : reverse-proxy / CDN).
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # CSP — voir les besoins réels de l'app :
+    #   script-src 'self'          : le build Vite ne produit aucun script inline.
+    #   style-src 'unsafe-inline'  : styles inline React (positions de bbox / drag) + KaTeX.
+    #   style-src fonts.googleapis : @import Google Fonts dans src/index.css.
+    #   font-src fonts.gstatic     : fichiers de police servis par Google Fonts.
+    #   font-src 'self'            : polices KaTeX bundlées localement.
+    #   img-src / connect-src data: blob: : aperçu image (blob:) et pages PDF
+    #                               (data:), re-`fetch`ées par src/utils/cropImage.ts.
+    #   connect-src ${API_ORIGIN}  : appels XHR vers le backend (origine distincte).
+    #   worker-src blob:           : Web Worker pdfjs-dist (src/hooks/usePdfPreview.ts).
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ${API_ORIGIN} data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" always;
+
+    location ~* \.mjs$ {
+        default_type application/javascript;
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
