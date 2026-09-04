@@ -1,93 +1,66 @@
-# Hakili OCR
+<p align="center">
+  <img src="hakili-ocr/public/hakili-mark-512.png" alt="Hakili OCR" width="96" />
+</p>
 
-Hakili OCR transforme des photos, scans ou PDF de copies de mathématiques
-manuscrites en transcription structurée, éditable, en Markdown/LaTeX. Un
-élève ou un enseignant dépose une image ou un PDF, l'app envoie le document
-à Claude (API Anthropic) et affiche le résultat côte à côte avec l'image
-source : blocs de contenu surlignés par zone (bounding box colorée selon la
-confiance), édition du texte en place, repositionnement des boîtes,
-export Excel/PDF.
+<h1 align="center">Hakili OCR</h1>
 
-Pour l'architecture détaillée (backend et frontend), les décisions de
-conception, et le suivi des chantiers en cours, voir [`CLAUDE.md`](CLAUDE.md)
-— ce README est un point d'entrée pratique, pas un duplicata de cette
-référence.
+<p align="center">
+  <strong>Vos documents administratifs, saisis automatiquement — pas juste scannés.</strong>
+</p>
 
-## Structure du dépôt
+---
 
-```
-ocr-app/
-├── ocr-math-api/     # Backend Python/FastAPI — appelle Claude, sert l'API REST
-└── hakili-ocr/       # Frontend React 19 + TypeScript + Vite — interface utilisateur
-```
+## Le problème
 
-Les deux projets communiquent uniquement en HTTP (le frontend appelle le
-backend). Ils doivent tourner simultanément pour que l'app fonctionne de
-bout en bout.
+Fiches de présence, relevés de notes, formulaires, listes, registres... Une
+grande partie du travail administratif tient encore sur du papier, manuscrit
+ou imprimé. Le ressaisir à la main dans un tableur ou un logiciel de gestion
+est lent, répétitif, et source d'erreurs de recopie.
 
-## Démarrage rapide (Docker, recommandé)
+## Ce que fait Hakili OCR
 
-Depuis la racine du dépôt :
+Hakili OCR lit vos documents administratifs — photographiés, scannés ou en
+PDF — et en extrait automatiquement le contenu sous une forme structurée et
+directement exploitable : texte, tableaux, colonnes. Pas seulement une image
+numérisée : un texte réellement récupérable, corrigeable et exportable.
 
-```bash
-cp .env.example .env    # puis renseigner ANTHROPIC_API_KEY, APP_API_KEY, etc.
-docker compose up -d --build
-```
+**Concrètement, en 3 étapes :**
 
-- Frontend : `http://localhost:8021`
-- Backend : `http://localhost:8020` (docs Swagger : `http://localhost:8020/docs`)
+1. **Déposez** une photo, un scan ou un PDF (une page ou plusieurs centaines).
+2. **L'application lit le document** et reconstitue son contenu — y compris
+   les tableaux, ligne par ligne, avec leurs colonnes.
+3. **Vous vérifiez et exportez.** Chaque zone du document est indiquée comme
+   fiable, à vérifier, ou incertaine, avec un code couleur clair. Vous
+   corrigez en un clic ce qui doit l'être, directement à côté de l'image
+   d'origine, puis téléchargez le résultat en Excel ou en PDF.
 
-Après une modification de code :
+## Ce qui distingue Hakili OCR d'un simple scanner
 
-```bash
-docker compose up -d --build backend    # ou frontend
-```
+- **Un humain garde la main.** L'outil ne prétend jamais être sûr à 100% :
+  chaque zone lue affiche son niveau de confiance, et tout ce dont la lecture
+  est incertaine est mis en évidence — vous savez exactement quoi vérifier,
+  sans devoir tout relire.
+- **Les tableaux restent des tableaux.** Colonnes, en-têtes et lignes sont
+  reconstitués automatiquement, pas transformés en texte brut illisible.
+- **Les annotations manuscrites sont préservées séparément.** Une note ajoutée
+  à la main en couleur sur un document imprimé (une correction, un visa) est
+  détectée et conservée dans sa propre colonne, sans se mélanger au texte
+  d'origine.
+- **Les gros documents ne bloquent pas l'attente.** Un PDF de plusieurs
+  centaines de pages s'affiche au fur et à mesure de sa lecture — pas besoin
+  d'attendre la fin du traitement pour commencer à travailler sur les
+  premières pages.
+- **Vos corrections comptent.** Chaque correction apportée peut être
+  conservée pour améliorer la précision de la lecture avec le temps.
+- **Export prêt à l'emploi.** Résultat téléchargeable en Excel (`.xlsx`) ou en
+  PDF, directement utilisable dans vos outils existants.
 
-## Démarrage en développement (sans Docker)
+## Vous êtes développeur ?
 
-**Backend** (`ocr-math-api/`) :
+Toute la documentation technique — architecture, backend, frontend,
+déploiement, sécurité — vit dans [`docs/`](docs/README.md). C'est la
+référence à jour pour comprendre, faire évoluer ou déployer le projet.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate            # Windows
-pip install -r requirements.txt
-cp .env.example .env              # puis renseigner ANTHROPIC_API_KEY
-uvicorn app.main:app --reload     # http://127.0.0.1:8000
-```
+---
 
-**Frontend** (`hakili-ocr/`) :
-
-```bash
-npm install
-npm run dev        # http://localhost:5173
-```
-
-Voir le `## Commands` de `CLAUDE.md` pour le détail des scripts disponibles
-(build, lint, tests manuels) et les prérequis (PyMuPDF, WeasyPrint, etc.).
-
-## Configuration
-
-Les variables d'environnement sont documentées dans `.env.example` (racine,
-lu par `docker-compose.yml`) et dans les `.env.example` propres à chaque
-sous-projet (usage en développement local, hors Docker). Ne jamais committer
-un fichier `.env` réel — déjà exclu via `.gitignore`.
-
-Points clés :
-- `ANTHROPIC_API_KEY` — clé API Anthropic (console.anthropic.com), distincte d'un abonnement Claude Pro/Max.
-- `APP_API_KEY` — secret partagé entre le frontend et le backend (header `X-API-Key`), requis sur les endpoints `/transcribe*` et `/corrections`.
-- `ALLOWED_ORIGINS` — origines autorisées par le CORS du backend.
-
-## Fonctionnalités principales
-
-- Transcription OCR d'une image ou d'un PDF (traitement asynchrone par job, avec suivi de progression page par page).
-- Visualisation côte à côte : image source annotée + transcription Markdown/LaTeX.
-- Édition en place du texte (bloc ou cellule de tableau) et repositionnement des bounding boxes.
-- Export du résultat en Excel (`.xlsx`, généré côté client) et en PDF (généré côté serveur via WeasyPrint).
-- Capture optionnelle des corrections utilisateur (image croppée + texte original/corrigé) pour amélioration future du prompt/modèle.
-
-## Documentation
-
-Toute la documentation d'architecture, les conventions de code, et le suivi
-des chantiers (production readiness, sécurité, limitations connues) vivent
-dans [`CLAUDE.md`](CLAUDE.md) — à consulter avant toute modification
-substantielle du backend ou du frontend.
+<p align="center"><sub>Hakili OCR — propulsé par l'API Claude (Anthropic).</sub></p>

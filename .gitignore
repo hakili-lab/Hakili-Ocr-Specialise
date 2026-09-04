@@ -1,3 +1,7 @@
 # Variables d'environnement pour docker-compose (secrets réels)
 .env
 .claude/settings.local.json
+
+# Notes internes pour l'assistant IA (Claude Code) — pas destinées au dépôt
+# public ; la documentation destinée aux développeurs vit dans docs/.
+CLAUDE.md
