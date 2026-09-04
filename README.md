@@ -63,4 +63,4 @@ référence à jour pour comprendre, faire évoluer ou déployer le projet.
 
 ---
 
-<p align="center"><sub>Hakili OCR — propulsé par l'API Claude (Anthropic).</sub></p>
+<p align="center"><sub>Hakili OCR — propulsé par l'IA.</sub></p>
