@@ -26,7 +26,11 @@ export { TranscribeError };
 
 const USE_MOCK = false // Mettre à true pour utiliser les données factices ci-dessous
 const MOCK_DELAY_MS = 3000;
-const PDF_POLL_INTERVAL_MS = 8000;
+// Abaissé de 8000 à 4000 (2026-09-21) : compromis entre latence d'affichage
+// (délai moyen avant qu'une page déjà prête côté backend n'apparaisse à
+// l'écran) et charge du serveur (chaque poll reste une simple lecture
+// mémoire, sans appel Claude) — voir docs/decisions-et-limites-connues.md.
+const PDF_POLL_INTERVAL_MS = 4000;
 
 // === MOCK DATA (mode démo, sans backend) ===
 const MOCK_RESULT: TranscriptionResult = {

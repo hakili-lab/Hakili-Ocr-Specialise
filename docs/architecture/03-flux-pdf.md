@@ -1,4 +1,4 @@
-# Flux : transcription d'un PDF (classique, ≤ 30 pages)
+# Flux : transcription d'un PDF (classique, ≤ 10 pages)
 
 > Dernière vérification : commit `4a30eae`. Code : `ocr-math-api/app/routers/transcription.py` (`start_pdf_transcription`, `_run_pdf_job`, `_process_page_and_track`, `get_pdf_transcription_status`), `ocr-math-api/app/services/job_store.py`.
 
@@ -13,13 +13,13 @@ onglet fermé, etc.). À la place :
 2. le backend répond **immédiatement** avec un identifiant de job (`job_id`),
    avant même d'avoir transcrit la moindre page ;
 3. le frontend interroge ensuite `GET /transcribe/pdf/status/{job_id}` toutes
-   les 8 secondes (`PDF_POLL_INTERVAL_MS`) jusqu'à ce que le traitement soit
+   les 4 secondes (`PDF_POLL_INTERVAL_MS`) jusqu'à ce que le traitement soit
    terminé ;
 4. dès que la **première page** est prête, l'utilisateur voit déjà le résultat
    à l'écran et peut commencer à le corriger — les pages suivantes continuent
    d'arriver en arrière-plan (voir la section "Affichage progressif" plus bas).
 
-Ce flux est utilisé pour tout PDF de **30 pages ou moins**
+Ce flux est utilisé pour tout PDF de **10 pages ou moins**
 (`PDF_CHUNK_PAGE_COUNT_THRESHOLD`, côté frontend). Au-delà, c'est le flux par
 morceaux qui prend le relais — voir
 [`04-flux-pdf-chunke.md`](04-flux-pdf-chunke.md). Les deux flux partagent le
@@ -41,7 +41,7 @@ sequenceDiagram
     R->>BG: asyncio.create_task(_run_pdf_job)
     R-->>FE: 200 { job_id, pages_total }
 
-    loop toutes les 8s, tant que status == "processing"
+    loop toutes les 4s, tant que status == "processing"
         FE->>R: GET /transcribe/pdf/status/{job_id}
         R-->>FE: { status, pages_done, pages_total, result (partiel) }
     end
@@ -76,7 +76,7 @@ sequenceDiagram
 4. **Traitement parallèle des pages** — `_run_pdf_job()` lance un
    `asyncio.gather()` sur `_process_page_and_track()` pour **toutes les pages
    en même temps**. Le nombre d'appels Anthropic réellement simultanés reste
-   borné par le sémaphore global (`ANTHROPIC_CONCURRENCY`, défaut 6) côté
+   borné par le sémaphore global (`ANTHROPIC_CONCURRENCY`, défaut 2) côté
    `claude_service.py` — voir
    [`../backend/02-service-claude.md`](../backend/02-service-claude.md). Chaque
    page réussie ou échouée incrémente `job.pages_done` immédiatement (pas

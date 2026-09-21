@@ -35,15 +35,24 @@ class Settings:
     # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
     # done/error). Défaut : 30 min.
     JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
-    # Défaut aligné sur .env.example (8192, pas 4096) : une valeur trop basse risque de
-    # tronquer une réponse verbeuse (page avec un gros tableau) avant la fin du JSON —
-    # traité comme un échec (ValueError, voir claude_service.py), pas retenté automatiquement
-    # par le retry Anthropic (_create_message_with_retry) puisque ce n'est pas une erreur API.
-    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "8192"))
+    # Défaut aligné sur .env.example (24576, triplé depuis 8192) : une valeur trop basse
+    # risque de tronquer une réponse verbeuse (page avec un gros tableau) avant la fin du
+    # JSON — traité comme un échec (ValueError, voir claude_service.py), pas retenté
+    # automatiquement par le retry Anthropic (_create_message_with_retry) puisque ce n'est
+    # pas une erreur API.
+    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "24576"))
     # Nombre max d'appels Anthropic simultanés (sémaphore global, claude_service.py).
     # Protège contre le rate limit Anthropic (429) et les pics de coût lors du
-    # traitement parallèle des pages d'un PDF (_run_pdf_job).
-    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "6"))
+    # traitement parallèle des pages d'un PDF (_run_pdf_job). Abaissé de 6 à 2
+    # (2026-09-21) : sur le serveur de déploiement (3.7 Gi RAM, sans swap), 6
+    # pages traitées en parallèle (image rasterisée + réponse Claude en mémoire
+    # chacune) a provoqué un OOM-kill du backend (exit 137) pendant un job PDF.
+    # Un swap aurait servi de filet de sécurité complémentaire, mais le compte
+    # applicatif n'a pas de droits root sur ce serveur pour l'ajouter — en
+    # attendant, la concurrence est descendue plus bas que prévu (3 → 2) pour
+    # compenser côté application. À remonter dès que le swap est en place —
+    # voir docs/decisions-et-limites-connues.md.
+    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "2"))
     # Délai max (secondes) accordé à UNE tentative d'appel Anthropic avant de la
     # considérer en échec — sans ça, un appel qui ne répond jamais monopoliserait
     # indéfiniment une place du sémaphore ANTHROPIC_CONCURRENCY.

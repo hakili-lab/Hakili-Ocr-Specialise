@@ -102,8 +102,8 @@ Le backend expose trois façons de transcrire un document, selon sa taille :
 | Flux | Endpoint(s) | Quand | Détail |
 |---|---|---|---|
 | Image unique | `POST /transcribe` | Une image (PNG/JPEG) | [`02-flux-image.md`](02-flux-image.md) |
-| PDF classique | `POST /transcribe/pdf/start` + `GET /transcribe/pdf/status/{id}` | PDF ≤ 30 pages | [`03-flux-pdf.md`](03-flux-pdf.md) |
-| PDF par morceaux | `POST /transcribe/pdf/start-chunked` + `POST /transcribe/pdf/{id}/chunk` | PDF > 30 pages | [`04-flux-pdf-chunke.md`](04-flux-pdf-chunke.md) |
+| PDF classique | `POST /transcribe/pdf/start` + `GET /transcribe/pdf/status/{id}` | PDF ≤ 10 pages | [`03-flux-pdf.md`](03-flux-pdf.md) |
+| PDF par morceaux | `POST /transcribe/pdf/start-chunked` + `POST /transcribe/pdf/{id}/chunk` | PDF > 10 pages | [`04-flux-pdf-chunke.md`](04-flux-pdf-chunke.md) |
 
 Le choix entre les deux flux PDF est fait **côté frontend**, automatiquement,
 selon le nombre de pages (`PDF_CHUNK_PAGE_COUNT_THRESHOLD` dans

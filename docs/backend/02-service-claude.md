@@ -36,7 +36,7 @@ def _get_semaphore() -> asyncio.Semaphore:
 ```
 
 **Un seul sémaphore, global à tout le process** — pas un par job PDF. Borne à
-`ANTHROPIC_CONCURRENCY` (défaut 6) le nombre d'appels Anthropic **réellement
+`ANTHROPIC_CONCURRENCY` (défaut 2) le nombre d'appels Anthropic **réellement
 en vol** au même instant, que les appels viennent des pages parallélisées d'un
 même PDF (`_run_pdf_job`) ou de plusieurs utilisateurs différents en même
 temps. Sans lui : paralléliser les pages d'un PDF enverrait des dizaines

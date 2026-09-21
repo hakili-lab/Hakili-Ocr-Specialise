@@ -148,6 +148,50 @@ pratique). Détail : [`../architecture/03-flux-pdf.md`](architecture/03-flux-pdf
   d'aperçu paresseux (page par page, à la demande de navigation) serait le
   correctif si cela devient un vrai problème perçu par les utilisateurs.
 
+## OOM en production + retuning des paramètres de traitement PDF (2026-09-21)
+
+**Incident** : sur le serveur de déploiement (VPS `guichet-entrepreneur`,
+3.7 Gi de RAM, **sans swap**), le backend a été tué par le noyau (`exited
+with code 137`, SIGKILL) en pleine session de traitement PDF chunké, juste
+après le retour de deux appels Anthropic. `docker-compose.yml` relance le
+service (`restart: unless-stopped`), mais `job_store.py` étant en mémoire
+process (voir "Known limitation" plus haut / `01-vue-ensemble.md`), le job en
+cours a été perdu — le frontend a continué à poller un `job_id` qui n'existait
+plus dans le nouveau process (`404` en boucle). `free -h` a confirmé une marge
+mémoire déjà très étroite au repos (254 Mi libres sur 3.7 Gi), cause quasi
+certaine malgré l'absence d'accès `dmesg` pour une confirmation noyau directe.
+
+**Changements appliqués** (tous par défaut, `.env`/constantes ; à répercuter
+sur le `.env` du serveur qui ne suit pas ce dépôt) :
+
+| Paramètre | Avant | Après | Raison |
+|---|---|---|---|
+| `ANTHROPIC_CONCURRENCY` | 6 | 2 | Réduit le pic mémoire du traitement PDF parallèle (moins d'images rasterisées + réponses Claude en mémoire simultanément). D'abord baissé à 3, puis à **2** (voir ci-dessous) faute de pouvoir ajouter un filet de sécurité swap. Contrepartie acceptée : débit plus faible sur un document long. |
+| `PDF_POLL_INTERVAL_MS` | 8000 | 4000 | Réduit la latence d'affichage perçue (délai entre "page prête côté backend" et "page visible à l'écran") sans multiplier la charge par 4 (2s envisagé puis écarté). |
+| `PDF_CHUNK_SIZE_PAGES` | 20 | 10 | Toujours largement au-dessus d'`ANTHROPIC_CONCURRENCY` (2) pour saturer le sémaphore ; un morceau plus petit se rasterise plus vite, donc la première page d'un morceau apparaît plus tôt. |
+| `PDF_CHUNK_PAGE_COUNT_THRESHOLD` | 30 | 10 | Le flux `/pdf/start` (non chunké) rasterise *toutes* les pages avant de créer le job — pour un document de taille moyenne, ça retardait le tout premier appel Claude (donc la première page affichée). Abaisser le seuil fait basculer plus tôt vers le flux chunké, qui rasterise en arrière-plan par morceau. |
+
+**Swap non ajouté — pas d'accès root sur le serveur de déploiement** :
+le compte applicatif (`hakili-ocr`) n'a pas de droits sudo (`sudo fallocate…`
+refusé), et il n'existe pas d'autre compte root/admin disponible au moment de
+cette entrée. Ajouter du swap nécessite soit une intervention de
+l'hébergeur, soit un accès root regagné — non fait tant que ça n'est pas
+possible. En compensation, `ANTHROPIC_CONCURRENCY` a été baissé plus bas que
+prévu initialement (3 → **2**) : sans filet de sécurité mémoire côté OS, le
+seul levier restant pour limiter le risque d'OOM est de réduire encore le
+pic côté application. **À revisiter** : remonter à 3 (voire plus) dès que le
+swap est en place.
+
+**Non corrigé par ce retuning** (causes structurelles distinctes, laissées
+en l'état) :
+- `LoadingScreen.tsx` n'affiche aucune progression réelle avant que la
+  première page ne soit prête (simplification volontaire du 2026-08-24,
+  spinner générique + texte en rotation) — régression perçue par rapport à
+  l'ancien compteur "Page X / Y", mais pas de changement fonctionnel ici.
+- Le flux `/pdf/start` (documents ≤ 10 pages désormais) rasterise toujours
+  toutes ses pages de façon synchrone avant de créer le job — non corrigé,
+  changement d'architecture plus lourd.
+
 ## Voir aussi
 
 - [`security.md`](security.md) — les décisions de sécurité en détail, avec leur justification complète.

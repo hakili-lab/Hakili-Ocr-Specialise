@@ -1,4 +1,4 @@
-# Flux : transcription d'un PDF par morceaux (chunké, > 30 pages)
+# Flux : transcription d'un PDF par morceaux (chunké, > 10 pages)
 
 > Dernière vérification : commit `4a30eae`. Code : `ocr-math-api/app/routers/transcription.py` (section « Upload PDF par morceaux »), `hakili-ocr/src/utils/pdfChunking.ts`, `hakili-ocr/src/hooks/useTranscribe.ts` (`startPdfChunkedFlow`).
 
@@ -13,7 +13,7 @@ morceau dès sa réception, pendant que le morceau suivant est encore en train
 d'arriver.
 
 Ce flux est **transparent pour l'utilisateur** : c'est uniquement le nombre de
-pages du PDF (> 30, `PDF_CHUNK_PAGE_COUNT_THRESHOLD`) qui décide, côté
+pages du PDF (> 10, `PDF_CHUNK_PAGE_COUNT_THRESHOLD`) qui décide, côté
 frontend, s'il faut passer par ici plutôt que par le flux classique
 ([`03-flux-pdf.md`](03-flux-pdf.md)). Le polling de statut
 (`GET /transcribe/pdf/status/{job_id}`) est **exactement le même** dans les
@@ -41,7 +41,7 @@ sequenceDiagram
     FE->>R: POST /transcribe/pdf/start-chunked { pages_expected }
     R->>JS: create_chunked_job(pages_expected) — plafonné à MAX_PDF_PAGES
     R-->>FE: { job_id, pages_total }
-    FE->>FE: splitLoadedPdfIntoChunks(doc, 20) — sous-PDF de 20 pages
+    FE->>FE: splitLoadedPdfIntoChunks(doc, 10) — sous-PDF de 10 pages
 
     loop pour chaque morceau, séquentiellement
         FE->>R: POST /transcribe/pdf/{job_id}/chunk (sous-PDF, is_last_chunk)
@@ -55,7 +55,7 @@ sequenceDiagram
         end
     end
 
-    loop toutes les 8s (identique au flux classique)
+    loop toutes les 4s (identique au flux classique)
         FE->>R: GET /transcribe/pdf/status/{job_id}
         R-->>FE: { status, pages_done, pages_total, result (partiel) }
     end
@@ -70,8 +70,8 @@ sequenceDiagram
    nombre trop bas puis en envoyant plus de pages réparties sur plusieurs
    morceaux : cette valeur plafonnée devient le **budget cumulé** du job.
 2. **Découpage côté client** — `splitLoadedPdfIntoChunks(doc, 20)` produit des
-   sous-PDF de 20 pages (`PDF_CHUNK_SIZE_PAGES`) — volontairement au-dessus de
-   `ANTHROPIC_CONCURRENCY` (6) pour qu'un morceau sature le sémaphore de
+   sous-PDF de 10 pages (`PDF_CHUNK_SIZE_PAGES`) — volontairement au-dessus de
+   `ANTHROPIC_CONCURRENCY` (2) pour qu'un morceau sature le sémaphore de
    traitement pendant que le suivant est envoyé.
 3. **Envoi strictement séquentiel** — le frontend attend la réponse du morceau
    N avant d'envoyer le morceau N+1 (boucle `for` avec `await` dans

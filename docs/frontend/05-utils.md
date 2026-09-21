@@ -109,10 +109,10 @@ uniquement par `useCorrectionCapture`.
 Voir [`../architecture/04-flux-pdf-chunke.md`](../architecture/04-flux-pdf-chunke.md)
 pour le contexte complet. Fonctions clés :
 
-- **`PDF_CHUNK_PAGE_COUNT_THRESHOLD = 30`** : au-delà, le flux chunké
+- **`PDF_CHUNK_PAGE_COUNT_THRESHOLD = 10`** : au-delà, le flux chunké
   remplace le flux classique.
-- **`PDF_CHUNK_SIZE_PAGES = 20`** : pages par morceau, au-dessus
-  d'`ANTHROPIC_CONCURRENCY` (6, backend) pour qu'un morceau sature le
+- **`PDF_CHUNK_SIZE_PAGES = 10`** : pages par morceau, au-dessus
+  d'`ANTHROPIC_CONCURRENCY` (2, backend) pour qu'un morceau sature le
   sémaphore de traitement pendant que le suivant s'envoie.
 - **`loadPdf(file)`** : charge le PDF (`PDFDocument.load`, coûteux sur un gros
   fichier) et rapporte son nombre de pages. Réutilise le `PDFDocument` déjà

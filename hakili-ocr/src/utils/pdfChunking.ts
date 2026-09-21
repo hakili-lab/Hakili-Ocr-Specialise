@@ -17,16 +17,23 @@ import { takeCachedPdfDoc } from './pdfDocCache';
  * Au-delà de ce nombre de pages, le PDF est envoyé par morceaux plutôt qu'en un seul POST —
  * voir le choix de flux dans `useTranscribe.ts`. Sous ce seuil, découper n'apporterait rien
  * (juste des allers-retours réseau en plus) : le flux `/pdf/start` classique reste inchangé.
+ * Abaissé de 30 à 10 (2026-09-21) : le flux `/pdf/start` rasterise *toutes* les pages avant
+ * même de créer le job (voir `start_pdf_transcription`, `transcription.py`) — pour un PDF de
+ * taille moyenne, ça retardait le tout premier appel Claude (donc la première page affichée)
+ * de la durée totale de rasterisation du document. Le flux chunké rasterise en arrière-plan,
+ * morceau par morceau, donc la première page apparaît plus tôt dès qu'on y bascule plus tôt.
  */
-export const PDF_CHUNK_PAGE_COUNT_THRESHOLD = 30;
+export const PDF_CHUNK_PAGE_COUNT_THRESHOLD = 10;
 
 /**
- * Nombre de pages par morceau — nettement au-dessus d'`ANTHROPIC_CONCURRENCY` (6, backend
+ * Nombre de pages par morceau — nettement au-dessus d'`ANTHROPIC_CONCURRENCY` (2, backend
  * `claude_service.py`) pour qu'un morceau sature le sémaphore de traitement pendant que le
  * suivant est envoyé, sans être si gros que la rasterisation d'un morceau devienne elle-même
- * un goulot d'étranglement notable.
+ * un goulot d'étranglement notable. Abaissé de 20 à 10 (2026-09-21), en cohérence avec la
+ * baisse d'`ANTHROPIC_CONCURRENCY` (6 → 2) — reste largement au-dessus pour saturer le
+ * sémaphore, tout en rasterisant un morceau plus vite (première page visible plus tôt).
  */
-export const PDF_CHUNK_SIZE_PAGES = 20;
+export const PDF_CHUNK_SIZE_PAGES = 10;
 
 /**
  * Un PDF chargé une seule fois (`PDFDocument.load`, qui analyse toute la structure du

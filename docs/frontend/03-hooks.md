@@ -27,7 +27,7 @@ flowchart TD
     B -->|non| C["imageMutation.mutate(file)<br/>→ POST /transcribe (synchrone)"]
     B -->|oui| D["startPdfChunkedFlow(file)"]
     D --> E["loadPdf(file) — pdf-lib, compte les pages"]
-    E --> F{"pageCount > PDF_CHUNK_PAGE_COUNT_THRESHOLD (30) ?"}
+    E --> F{"pageCount > PDF_CHUNK_PAGE_COUNT_THRESHOLD (10) ?"}
     F -->|non| G["startPdfMutation.mutate(file)<br/>→ POST /pdf/start (flux classique)"]
     F -->|oui| H["startPdfJobChunked + envoi séquentiel des morceaux<br/>→ /pdf/start-chunked + /pdf/{id}/chunk"]
 ```

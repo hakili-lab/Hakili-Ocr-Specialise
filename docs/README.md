@@ -37,7 +37,7 @@ rapidement une panne en production.
 1. [Vue d'ensemble](architecture/01-vue-ensemble.md) — ce que fait l'app, les deux projets, comment ils communiquent
 2. [Flux : image simple](architecture/02-flux-image.md) — `POST /transcribe`, pas à pas
 3. [Flux : PDF classique](architecture/03-flux-pdf.md) — job asynchrone, polling, affichage progressif
-4. [Flux : PDF par morceaux](architecture/04-flux-pdf-chunke.md) — pour les gros documents (> 30 pages)
+4. [Flux : PDF par morceaux](architecture/04-flux-pdf-chunke.md) — pour les gros documents (> 10 pages)
 
 ### Backend (`ocr-math-api/`)
 
