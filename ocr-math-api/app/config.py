@@ -43,27 +43,42 @@ class Settings:
     # (3.7 Gi RAM, sans swap accessible), une réponse Claude plus longue bufferisée en mémoire
     # est un facteur de risque OOM direct — voir docs/decisions-et-limites-connues.md.
     MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "12288"))
-    # Nombre max d'appels Anthropic simultanés (sémaphore global, claude_service.py).
-    # Protège contre le rate limit Anthropic (429) et les pics de coût lors du
-    # traitement parallèle des pages d'un PDF (_run_pdf_job). Abaissé de 6 à 2
-    # (2026-09-21) : sur le serveur de déploiement (3.7 Gi RAM, sans swap), 6
-    # pages traitées en parallèle (image rasterisée + réponse Claude en mémoire
-    # chacune) a provoqué un OOM-kill du backend (exit 137) pendant un job PDF.
-    # Un swap aurait servi de filet de sécurité complémentaire, mais le compte
-    # applicatif n'a pas de droits root sur ce serveur pour l'ajouter — en
-    # attendant, la concurrence est descendue plus bas que prévu (3 → 2) pour
-    # compenser côté application. À remonter dès que le swap est en place —
-    # voir docs/decisions-et-limites-connues.md.
-    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "2"))
+    # Nombre max d'appels Anthropic simultanés (sémaphore à PRIORITÉ depuis le
+    # 2026-09-21, voir claude_service.py: PrioritySemaphore). Protège contre le
+    # rate limit Anthropic (429) et les pics de coût lors du traitement parallèle
+    # des pages d'un PDF (_run_pdf_job).
+    #
+    # Historique production : abaissé de 6 à 2 le 2026-09-21 suite à un OOM-kill
+    # du backend (exit 137) sur le serveur de déploiement (3.7 Gi RAM, sans swap)
+    # pendant un job PDF — voir docs/decisions-et-limites-connues.md, section
+    # "OOM en production...". Le compte applicatif n'a pas de droits root sur ce
+    # serveur pour ajouter du swap ; à remonter dès que c'est possible.
+    #
+    # Remonté à 6 le même jour (ce commit) — mais comme valeur par défaut de
+    # DÉVELOPPEMENT/TEST LOCAL uniquement, pour exercer le nouveau
+    # PrioritySemaphore (ordonnancement par numéro de page + place tenue
+    # pendant le backoff de retry, voir _create_message_with_retry) avec
+    # suffisamment de pages en vol simultanément pour observer un effet. Le
+    # serveur de production garde sa propre variable d'environnement
+    # ANTHROPIC_CONCURRENCY=2 dans son `.env` (qui ne suit pas ce dépôt, voir
+    # docs/decisions-et-limites-connues.md) — ce défaut de code n'affecte donc
+    # PAS le déploiement actuel, sauf redéploiement depuis un checkout neuf sans
+    # définir la variable. NE PAS déployer 6 en production tant que le swap
+    # n'est pas en place.
+    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "6"))
     # Délai max (secondes) accordé à UNE tentative d'appel Anthropic avant de la
     # considérer en échec — sans ça, un appel qui ne répond jamais monopoliserait
     # indéfiniment une place du sémaphore ANTHROPIC_CONCURRENCY.
     ANTHROPIC_REQUEST_TIMEOUT_SECONDS: float = float(os.getenv("ANTHROPIC_REQUEST_TIMEOUT_SECONDS", "120"))
     # Nombre de tentatives supplémentaires (après la première) pour une erreur
     # transitoire (429, 5xx, connexion) — gérées nous-mêmes (claude_service.py,
-    # _create_message_with_retry) plutôt que par le retry interne du SDK, pour que
-    # l'attente de backoff entre deux tentatives libère la place du sémaphore au
-    # lieu de la monopoliser.
+    # _create_message_with_retry) plutôt que par le retry interne du SDK, pour
+    # garder le contrôle du backoff/logging/classification et pour tenir la MÊME
+    # place de PrioritySemaphore pendant toute la séquence de tentatives d'une
+    # page (changé le 2026-09-21 — auparavant la place était relâchée pendant
+    # l'attente de backoff ; inversé pour empêcher qu'une page neuve ne double
+    # dans la file d'attente une page mid-retry, voir le docstring de
+    # `_create_message_with_retry`).
     ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
     # Délai de base (secondes) du backoff exponentiel entre deux tentatives —
     # doublé à chaque tentative (1, 2, 4, 8...), plus un peu d'aléatoire (jitter)

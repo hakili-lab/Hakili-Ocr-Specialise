@@ -19,7 +19,7 @@ depuis l'environnement (fichier `.env` via `python-dotenv`, ou variables systèm
 | `JOB_TTL_SECONDS` | `14400` (4h) | Durée après laquelle un job PDF terminé (`done`/`error`) est purgé de la mémoire. |
 | `JOB_STALL_TIMEOUT_SECONDS` | `1800` (30 min) | Durée sans nouveau morceau reçu au-delà de laquelle un job chunké non finalisé est considéré bloqué et purgé. |
 | `MAX_TOKENS` | `8192` | Budget de tokens de sortie pour un appel Claude. Trop bas → réponse tronquée sur un document avec un gros tableau (traité comme une erreur, pas retenté). |
-| `ANTHROPIC_CONCURRENCY` | `2` | Nombre max d'appels Anthropic simultanés (sémaphore global) — protège contre le rate limit Anthropic et les pics de coût. |
+| `ANTHROPIC_CONCURRENCY` | `6` (test local ; `2` en production, voir [`../decisions-et-limites-connues.md`](../decisions-et-limites-connues.md)) | Nombre max d'appels Anthropic simultanés (sémaphore **à priorité** — voir [`02-service-claude.md`](02-service-claude.md)) — protège contre le rate limit Anthropic et les pics de coût. |
 | `ANTHROPIC_REQUEST_TIMEOUT_SECONDS` | `120` | Délai max accordé à **une** tentative d'appel Anthropic. |
 | `ANTHROPIC_MAX_RETRIES` | `3` | Tentatives **supplémentaires** (après la première) pour une erreur transitoire (429, 5xx, connexion). |
 | `ANTHROPIC_RETRY_BASE_DELAY_SECONDS` | `1` | Délai de base du backoff exponentiel entre deux tentatives (doublé à chaque tentative + jitter). |
@@ -30,7 +30,10 @@ depuis l'environnement (fichier `.env` via `python-dotenv`, ou variables systèm
 - **`ANTHROPIC_CONCURRENCY`** — l'augmenter sans discernement peut heurter le
   rate limit réel du compte Anthropic (429 en rafale) ; le retry/backoff
   (`02-service-claude.md`) absorbe des 429 occasionnels, pas un mur
-  systématique.
+  systématique. Depuis le 2026-09-21, une page mid-retry tient sa place
+  pendant tout le backoff (pas relâchée entre deux tentatives) — un pic de
+  429 réduit donc temporairement le débit utile plus qu'avant, en échange
+  d'un ordre de file d'attente plus prévisible (`PrioritySemaphore`).
 - **`MAX_TOKENS`** — l'augmenter sans certitude que le modèle en a besoin
   augmente le coût par appel (les tokens de sortie sont facturés, pas
   seulement consommés) sans bénéfice si les réponses ne sont jamais tronquées

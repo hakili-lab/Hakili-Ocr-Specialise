@@ -48,7 +48,7 @@ router = APIRouter(prefix="/transcribe", tags=["transcription"], dependencies=[D
 _background_tasks: set[asyncio.Task] = set()
 
 
-async def _process_single_image(raw_bytes: bytes, media_type: str):
+async def _process_single_image(raw_bytes: bytes, media_type: str, priority: int = 0):
     """
     Pipeline commun : orientation → resize → base64 → Claude.
     `normalize_orientation`/`resize_for_vision` (PIL) et `encode_bytes_to_base64`
@@ -56,13 +56,20 @@ async def _process_single_image(raw_bytes: bytes, media_type: str):
     qu'ils ne bloquent la boucle d'événements pendant leur exécution (impact
     direct sur les autres requêtes concurrentes, ex. le polling de statut d'un
     autre job PDF).
+
+    `priority` (défaut 0) est transmis tel quel à `call_anthropic_ocr` — voir son
+    docstring et `claude_service.PrioritySemaphore`. `_process_page_and_track` y
+    passe le numéro de page ; `transcribe_image` (image seule) n'a pas de notion
+    de page et laisse le défaut.
     """
     raw_bytes = await asyncio.to_thread(normalize_orientation, raw_bytes, media_type)
     raw_bytes, image_width, image_height = await asyncio.to_thread(
         resize_for_vision, raw_bytes, media_type
     )
     image_b64 = await asyncio.to_thread(encode_bytes_to_base64, raw_bytes)
-    ocr_result = await call_anthropic_ocr(image_b64, media_type, image_width, image_height)
+    ocr_result = await call_anthropic_ocr(
+        image_b64, media_type, image_width, image_height, priority=priority
+    )
     return ocr_result, image_b64, image_width, image_height
 
 
@@ -143,6 +150,13 @@ async def _process_page_and_track(
     persistants de `job`, accumulés au fil de plusieurs vagues successives,
     pas des listes locales à un seul appel).
 
+    `page_number` sert aussi de priorité de file d'attente au sémaphore Anthropic
+    (`_process_single_image` → `call_anthropic_ocr` → `PrioritySemaphore`, voir
+    `claude_service.py`) : entre plusieurs pages qui attendent une place, la plus
+    petite est servie en premier. Ne garantit pas l'ordre de complétion entre
+    pages déjà en cours d'exécution — voir les limites documentées sur
+    `PrioritySemaphore`/`_create_message_with_retry`.
+
     `job.pages_done` est incrémenté ici, en effet de bord, dès la fin de CETTE
     page — pas après qu'un `gather` englobant ait fini d'attendre toutes les
     pages d'un coup. Comme `GET /pdf/status/{job_id}` lit `job.pages_done`
@@ -154,7 +168,9 @@ async def _process_page_and_track(
     """
     media_type = "image/png"  # convert_pdf_to_images produit du PNG
     try:
-        ocr_result, image_b64, w, h = await _process_single_image(img_bytes, media_type)
+        ocr_result, image_b64, w, h = await _process_single_image(
+            img_bytes, media_type, priority=page_number
+        )
     except anthropic.APIError as exc:
         detail = describe_anthropic_error(exc)
         logger.error("Échec transcription page %d : %s", page_number, detail)

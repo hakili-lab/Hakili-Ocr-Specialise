@@ -26,14 +26,21 @@ import { takeCachedPdfDoc } from './pdfDocCache';
 export const PDF_CHUNK_PAGE_COUNT_THRESHOLD = 10;
 
 /**
- * Nombre de pages par morceau — nettement au-dessus d'`ANTHROPIC_CONCURRENCY` (2, backend
- * `claude_service.py`) pour qu'un morceau sature le sémaphore de traitement pendant que le
- * suivant est envoyé, sans être si gros que la rasterisation d'un morceau devienne elle-même
- * un goulot d'étranglement notable. Abaissé de 20 à 10 (2026-09-21), en cohérence avec la
- * baisse d'`ANTHROPIC_CONCURRENCY` (6 → 2) — reste largement au-dessus pour saturer le
- * sémaphore, tout en rasterisant un morceau plus vite (première page visible plus tôt).
+ * Nombre de pages par morceau — nettement au-dessus d'`ANTHROPIC_CONCURRENCY` pour qu'un
+ * morceau sature le sémaphore de traitement pendant que le suivant est envoyé, sans être si
+ * gros que la rasterisation d'un morceau devienne elle-même un goulot d'étranglement notable.
+ *
+ * Historique production : abaissé de 20 à 10 (2026-09-21), en cohérence avec la baisse
+ * d'`ANTHROPIC_CONCURRENCY` (6 → 2) suite à l'incident OOM — voir
+ * docs/decisions-et-limites-connues.md.
+ *
+ * Remonté à 12 le même jour (ce commit) — valeur de TEST LOCAL uniquement, en cohérence avec
+ * le retour temporaire d'`ANTHROPIC_CONCURRENCY` à 6 côté backend pour exercer le nouveau
+ * PrioritySemaphore (voir ocr-math-api/app/services/claude_service.py). Le serveur de
+ * production reste sur la paire (concurrence 2, morceaux de 10) tant que le swap n'est pas
+ * en place — ne pas redéployer 12 avant confirmation.
  */
-export const PDF_CHUNK_SIZE_PAGES = 10;
+export const PDF_CHUNK_SIZE_PAGES = 12;
 
 /**
  * Un PDF chargé une seule fois (`PDFDocument.load`, qui analyse toute la structure du

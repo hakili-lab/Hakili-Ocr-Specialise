@@ -83,8 +83,8 @@ volontaire — voir [`security.md`](security.md).
 
 1. Vérifiez d'abord si le job est **réellement** bloqué ou juste long : un PDF
    de plusieurs centaines de pages peut légitimement prendre plusieurs
-   minutes, borné par `ANTHROPIC_CONCURRENCY` (2 appels simultanés par
-   défaut).
+   minutes, borné par `ANTHROPIC_CONCURRENCY` (6 en test local / 2 en
+   production — voir `decisions-et-limites-connues.md`).
 2. Si c'est un job **chunké** (`/pdf/start-chunked`) et que le client a
    abandonné l'upload en cours de route (onglet fermé), le job sera purgé
    automatiquement après `JOB_STALL_TIMEOUT_SECONDS` (défaut 30 min) — pas

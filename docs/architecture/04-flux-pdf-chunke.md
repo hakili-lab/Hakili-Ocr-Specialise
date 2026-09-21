@@ -69,10 +69,12 @@ sequenceDiagram
    `MAX_PDF_PAGES` — un client ne peut pas contourner la limite en annonçant un
    nombre trop bas puis en envoyant plus de pages réparties sur plusieurs
    morceaux : cette valeur plafonnée devient le **budget cumulé** du job.
-2. **Découpage côté client** — `splitLoadedPdfIntoChunks(doc, 20)` produit des
-   sous-PDF de 10 pages (`PDF_CHUNK_SIZE_PAGES`) — volontairement au-dessus de
-   `ANTHROPIC_CONCURRENCY` (2) pour qu'un morceau sature le sémaphore de
-   traitement pendant que le suivant est envoyé.
+2. **Découpage côté client** — `splitLoadedPdfIntoChunks(doc, 12)` produit des
+   sous-PDF de 12 pages (`PDF_CHUNK_SIZE_PAGES`, valeur de test local — 10 en
+   production, voir [`../decisions-et-limites-connues.md`](../decisions-et-limites-connues.md))
+   — volontairement au-dessus de `ANTHROPIC_CONCURRENCY` (6 en test local / 2 en
+   production) pour qu'un morceau sature le sémaphore de traitement pendant que
+   le suivant est envoyé.
 3. **Envoi strictement séquentiel** — le frontend attend la réponse du morceau
    N avant d'envoyer le morceau N+1 (boucle `for` avec `await` dans
    `startPdfChunkedFlow`). C'est ce contrat qui permet au backend de numéroter

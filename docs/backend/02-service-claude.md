@@ -27,26 +27,47 @@ def _get_client() -> anthropic.AsyncAnthropic:
   défaut 120s), pour qu'un appel qui ne répond jamais ne bloque pas
   indéfiniment une place du sémaphore.
 
-## Le sémaphore de concurrence (`_get_semaphore`)
+## Le sémaphore de concurrence à priorité (`_get_semaphore`, `PrioritySemaphore`)
 
 ```python
 @lru_cache
-def _get_semaphore() -> asyncio.Semaphore:
-    return asyncio.Semaphore(get_settings().ANTHROPIC_CONCURRENCY)
+def _get_semaphore() -> PrioritySemaphore:
+    return PrioritySemaphore(get_settings().ANTHROPIC_CONCURRENCY)
 ```
 
 **Un seul sémaphore, global à tout le process** — pas un par job PDF. Borne à
-`ANTHROPIC_CONCURRENCY` (défaut 2) le nombre d'appels Anthropic **réellement
-en vol** au même instant, que les appels viennent des pages parallélisées d'un
-même PDF (`_run_pdf_job`) ou de plusieurs utilisateurs différents en même
-temps. Sans lui : paralléliser les pages d'un PDF enverrait des dizaines
-d'appels d'un coup et heurterait le rate limit Anthropic (429), et deux jobs
-PDF simultanés cumuleraient leur charge sans aucune limite.
+`ANTHROPIC_CONCURRENCY` (défaut 6 — valeur de test local ; 2 en production, voir
+[`../decisions-et-limites-connues.md`](../decisions-et-limites-connues.md)) le
+nombre d'appels Anthropic **réellement en vol** au même instant, que les appels
+viennent des pages parallélisées d'un même PDF (`_run_pdf_job`) ou de plusieurs
+utilisateurs différents en même temps. Sans lui : paralléliser les pages d'un
+PDF enverrait des dizaines d'appels d'un coup et heurterait le rate limit
+Anthropic (429), et deux jobs PDF simultanés cumuleraient leur charge sans
+aucune limite.
 
-**Créé paresseusement** (pas au niveau module) : un `asyncio.Semaphore` doit
-être lié à la boucle d'événements active au moment de sa création — le créer
-au niveau module risquerait de le lier à la mauvaise boucle si le module est
-importé avant qu'`uvicorn` ne démarre la sienne.
+**`PrioritySemaphore` plutôt qu'`asyncio.Semaphore`** (depuis le 2026-09-21) :
+classe maison (`claude_service.py`) basée sur un tas min (`heapq`) au lieu
+d'une simple `deque` FIFO. Quand une place se libère et que plusieurs tâches
+attendent, celle avec le plus petit `priority` (le plus petit numéro de page)
+est servie en premier, pas forcément la première arrivée. But : le frontend
+(`takeReadyPagePrefix`) n'affiche que le préfixe contigu de pages prêtes à
+partir de la page 1 — sans priorité, une page à faible numéro repoussée loin
+dans la file (ex. après une erreur retryable) retardait l'affichage de toutes
+les pages suivantes déjà transcrites. Chaque appelant passe sa priorité via
+`call_anthropic_ocr(..., priority=...)` → `_create_message_with_retry` →
+`_acquire_priority_slot` ; `_process_page_and_track` y passe le numéro de
+page, `transcribe_image` (image seule) laisse le défaut `0`.
+
+**Limite assumée** : ceci ne réordonne que les tâches **en attente** au
+moment où une place se libère — ça ne garantit pas qu'une page à petit numéro
+termine avant une page à numéro plus élevé déjà **en cours d'exécution** sur
+une autre place.
+
+**Créé paresseusement** (pas au niveau module) : les `Future` internes créées
+par `PrioritySemaphore.acquire()` doivent être liées à la boucle d'événements
+active au moment de leur création — le créer au niveau module risquerait de
+le lier à la mauvaise boucle si le module est importé avant qu'`uvicorn` ne
+démarre la sienne.
 
 ## Le prompt système (`SYSTEM_PROMPT`)
 
@@ -96,13 +117,25 @@ réponse réduit. Purement additif — aucun changement de comportement.
 
 ## Retry et backoff (`_create_message_with_retry`, `_is_retryable_anthropic_error`)
 
-**Pourquoi pas le retry intégré du SDK ?** Avec le retry du SDK, l'attente de
-backoff entre deux tentatives se produirait **à l'intérieur** d'un seul
-`await client.messages.create(...)` — donc à l'intérieur du `async with` qui
-tient le sémaphore, monopolisant une place pendant tout le backoff. En gérant
-le retry nous-mêmes, le sémaphore n'est tenu **que pendant l'appel réseau
-lui-même** ; l'`asyncio.sleep()` du backoff se fait hors du `async with`,
-libérant la place pour une autre page pendant l'attente.
+**Pourquoi pas le retry intégré du SDK ?** Pour garder le contrôle du
+backoff/logging/classification des erreurs, et pour pouvoir tenir la **même**
+place de `PrioritySemaphore` pendant toute la séquence de tentatives d'une
+page — impossible avec le retry interne du SDK, qui ferait tout ça à
+l'intérieur d'un seul `await client.messages.create(...)`.
+
+**Place de sémaphore tenue pendant tout le backoff (changé le 2026-09-21)** :
+`_create_message_with_retry` acquiert **une seule fois** une place (`async
+with _acquire_priority_slot(priority):` enveloppe toute la boucle de
+tentatives), et la garde — y compris pendant l'`asyncio.sleep()` du backoff —
+jusqu'à ce que la page ait fini d'essayer (succès ou tentatives épuisées).
+**Comportement inversé par rapport à avant** : la place était auparavant
+relâchée pendant le backoff, justement pour ne pas la monopoliser ; mais ça
+permettait à une page neuve, jamais encore tentée, de doubler dans la file
+d'attente du sémaphore une page en train de retenter — avec l'introduction de
+`PrioritySemaphore`, ce doublage aurait sapé la priorité par numéro de page.
+Contrepartie assumée : une place reste inoccupée (aucun appel réseau en
+cours) pendant chaque backoff, réduisant le débit utile — jugé acceptable
+puisque les retries restent l'exception.
 
 - **Erreurs retentées** (`_is_retryable_anthropic_error`) : 429 (rate limit),
   toute erreur 5xx, ou un problème de connexion/timeout (pas de réponse HTTP

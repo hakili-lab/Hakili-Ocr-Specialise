@@ -193,6 +193,57 @@ en l'état) :
   toutes ses pages de façon synchrone avant de créer le job — non corrigé,
   changement d'architecture plus lourd.
 
+## Test local du sémaphore à priorité + place tenue pendant le retry (2026-09-21)
+
+**Contexte** : diagnostic de la limite déjà notée plus haut ("Limite connue de
+l'affichage progressif PDF") aggravée par le comportement du sémaphore de
+concurrence : les pages d'un job PDF sont lancées en parallèle
+(`asyncio.gather`) et servies dans l'ordre FIFO d'arrivée à la file du
+sémaphore — une page qui tombe en erreur transitoire (429, 5xx) et retente
+relâchait sa place pendant le backoff (design d'origine, voir
+`02-service-claude.md`), ce qui laissait des pages jamais encore tentées la
+doubler dans la file. Combiné au fait que le frontend (`takeReadyPagePrefix`)
+n'affiche que le préfixe contigu de pages prêtes à partir de la page 1, ça
+pouvait provoquer un long silence suivi d'un "burst" de plusieurs pages d'un
+coup dès que la page 1 finissait enfin (observé concrètement sur un test
+local avec un PDF de 75 pages : longue attente pour la page 1, puis ~6 pages
+révélées d'un coup).
+
+**Changement de code** : `claude_service.py` gagne une classe
+`PrioritySemaphore` (tas min `heapq`, priorité = numéro de page) à la place
+d'`asyncio.Semaphore`, et `_create_message_with_retry` acquiert désormais sa
+place **une seule fois pour toute la séquence de tentatives** d'une page
+(gardée pendant le backoff), au lieu de la relâcher entre deux tentatives.
+Voir le docstring de `PrioritySemaphore` et de `_create_message_with_retry`
+pour le détail et les limites assumées : ça ne garantit pas l'ordre de
+complétion entre pages déjà en vol (seules les tâches en attente sont
+réordonnées), et ça réduit le débit utile pendant un backoff (une place reste
+inoccupée). Vérifié par un script manuel isolé,
+`ocr-math-api/tests/test_priority_semaphore.py` (sémantique de comptage,
+ordre par priorité, tie-break FIFO, deux cas d'annulation) — les cinq
+vérifications passent.
+
+**Paramètres relevés temporairement, TEST LOCAL UNIQUEMENT** (pas pour la
+production tant que le swap n'est pas en place — voir la section OOM
+ci-dessus) :
+
+| Paramètre | Valeur production (inchangée) | Valeur de test local |
+|---|---|---|
+| `ANTHROPIC_CONCURRENCY` | 2 | 6 |
+| `PDF_CHUNK_SIZE_PAGES` | 10 | 12 |
+
+Ces deux valeurs ont été relevées ensemble dans les fichiers `.env`/`.env.example`
+du dépôt (racine et `ocr-math-api/`) et dans les valeurs par défaut de
+`config.py`/`pdfChunking.ts`, uniquement pour avoir assez de pages en vol
+simultanément lors d'un test local et observer un effet du nouvel
+ordonnancement par priorité. **Le `.env` du serveur de production ne suit pas
+ce dépôt** (voir la section OOM ci-dessus) : il garde
+`ANTHROPIC_CONCURRENCY=2` indépendamment de ce que dit `config.py`. Si ce
+dépôt est un jour redéployé depuis un checkout neuf sans `.env` de production
+déjà en place, il faut explicitement redéfinir `ANTHROPIC_CONCURRENCY=2` (et
+la taille de morceau associée côté frontend) avant tout déploiement réel — ne
+pas se fier au défaut de code tant que le swap n'est pas en place.
+
 ## Voir aussi
 
 - [`security.md`](security.md) — les décisions de sécurité en détail, avec leur justification complète.
