@@ -35,12 +35,14 @@ class Settings:
     # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
     # done/error). Défaut : 30 min.
     JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
-    # Défaut aligné sur .env.example (24576, triplé depuis 8192) : une valeur trop basse
-    # risque de tronquer une réponse verbeuse (page avec un gros tableau) avant la fin du
-    # JSON — traité comme un échec (ValueError, voir claude_service.py), pas retenté
-    # automatiquement par le retry Anthropic (_create_message_with_retry) puisque ce n'est
-    # pas une erreur API.
-    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "24576"))
+    # Défaut aligné sur .env.example (12288) : une valeur trop basse risque de tronquer une
+    # réponse verbeuse (page avec un gros tableau) avant la fin du JSON — traité comme un échec
+    # (ValueError, voir claude_service.py), pas retenté automatiquement par le retry Anthropic
+    # (_create_message_with_retry) puisque ce n'est pas une erreur API. Était monté à 24576
+    # (triplé depuis 8192) puis redescendu à 12288 (2026-09-21) : sur le serveur de déploiement
+    # (3.7 Gi RAM, sans swap accessible), une réponse Claude plus longue bufferisée en mémoire
+    # est un facteur de risque OOM direct — voir docs/decisions-et-limites-connues.md.
+    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "12288"))
     # Nombre max d'appels Anthropic simultanés (sémaphore global, claude_service.py).
     # Protège contre le rate limit Anthropic (429) et les pics de coût lors du
     # traitement parallèle des pages d'un PDF (_run_pdf_job). Abaissé de 6 à 2
