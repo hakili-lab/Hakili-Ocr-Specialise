@@ -229,10 +229,11 @@ ci-dessus) :
 
 | Paramètre | Valeur production (inchangée) | Valeur de test local |
 |---|---|---|
-| `ANTHROPIC_CONCURRENCY` | 2 | 6 |
-| `PDF_CHUNK_SIZE_PAGES` | 10 | 12 |
+| `ANTHROPIC_CONCURRENCY` | 2 | 3 (brièvement 6, redescendu le même jour) |
+| `PDF_CHUNK_SIZE_PAGES` | 10 | 6 (brièvement 12, redescendu le même jour — garde le même ratio ×2 par rapport à la concurrency) |
+| `MAX_TOKENS` | — (pas de valeur pinnée séparée en prod, voir section OOM ci-dessus) | 24576 (redescendu à 12288 pendant la mitigation OOM, remonté à 24576 le même jour pour ce test local) |
 
-Ces deux valeurs ont été relevées ensemble dans les fichiers `.env`/`.env.example`
+Ces valeurs ont été relevées ensemble dans les fichiers `.env`/`.env.example`
 du dépôt (racine et `ocr-math-api/`) et dans les valeurs par défaut de
 `config.py`/`pdfChunking.ts`, uniquement pour avoir assez de pages en vol
 simultanément lors d'un test local et observer un effet du nouvel

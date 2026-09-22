@@ -36,7 +36,7 @@ def _get_semaphore() -> PrioritySemaphore:
 ```
 
 **Un seul sémaphore, global à tout le process** — pas un par job PDF. Borne à
-`ANTHROPIC_CONCURRENCY` (défaut 6 — valeur de test local ; 2 en production, voir
+`ANTHROPIC_CONCURRENCY` (défaut 3 — valeur de test local ; 2 en production, voir
 [`../decisions-et-limites-connues.md`](../decisions-et-limites-connues.md)) le
 nombre d'appels Anthropic **réellement en vol** au même instant, que les appels
 viennent des pages parallélisées d'un même PDF (`_run_pdf_job`) ou de plusieurs

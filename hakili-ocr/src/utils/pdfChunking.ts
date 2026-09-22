@@ -34,13 +34,13 @@ export const PDF_CHUNK_PAGE_COUNT_THRESHOLD = 10;
  * d'`ANTHROPIC_CONCURRENCY` (6 → 2) suite à l'incident OOM — voir
  * docs/decisions-et-limites-connues.md.
  *
- * Remonté à 12 le même jour (ce commit) — valeur de TEST LOCAL uniquement, en cohérence avec
- * le retour temporaire d'`ANTHROPIC_CONCURRENCY` à 6 côté backend pour exercer le nouveau
- * PrioritySemaphore (voir ocr-math-api/app/services/claude_service.py). Le serveur de
- * production reste sur la paire (concurrence 2, morceaux de 10) tant que le swap n'est pas
- * en place — ne pas redéployer 12 avant confirmation.
+ * Ajusté à 6 le même jour (ce commit) — valeur de TEST LOCAL uniquement, en cohérence avec le
+ * retour temporaire d'`ANTHROPIC_CONCURRENCY` à 3 côté backend (2x, même ratio qu'avant) pour
+ * exercer le nouveau PrioritySemaphore (voir ocr-math-api/app/services/claude_service.py). Le
+ * serveur de production reste sur la paire (concurrence 2, morceaux de 10) tant que le swap
+ * n'est pas en place — ne pas redéployer 6 avant confirmation.
  */
-export const PDF_CHUNK_SIZE_PAGES = 12;
+export const PDF_CHUNK_SIZE_PAGES = 6;
 
 /**
  * Un PDF chargé une seule fois (`PDFDocument.load`, qui analyse toute la structure du

@@ -76,7 +76,7 @@ sequenceDiagram
 4. **Traitement parallèle des pages** — `_run_pdf_job()` lance un
    `asyncio.gather()` sur `_process_page_and_track()` pour **toutes les pages
    en même temps**. Le nombre d'appels Anthropic réellement simultanés reste
-   borné par le sémaphore global à priorité (`ANTHROPIC_CONCURRENCY`, défaut 6 en test local / 2 en production — voir [`../decisions-et-limites-connues.md`](../decisions-et-limites-connues.md)) côté
+   borné par le sémaphore global à priorité (`ANTHROPIC_CONCURRENCY`, défaut 3 en test local / 2 en production — voir [`../decisions-et-limites-connues.md`](../decisions-et-limites-connues.md)) côté
    `claude_service.py` — voir
    [`../backend/02-service-claude.md`](../backend/02-service-claude.md). Chaque
    page réussie ou échouée incrémente `job.pages_done` immédiatement (pas

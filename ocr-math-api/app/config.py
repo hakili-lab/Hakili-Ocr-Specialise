@@ -35,14 +35,16 @@ class Settings:
     # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
     # done/error). Défaut : 30 min.
     JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
-    # Défaut aligné sur .env.example (12288) : une valeur trop basse risque de tronquer une
+    # Défaut aligné sur .env.example (24576) : une valeur trop basse risque de tronquer une
     # réponse verbeuse (page avec un gros tableau) avant la fin du JSON — traité comme un échec
     # (ValueError, voir claude_service.py), pas retenté automatiquement par le retry Anthropic
-    # (_create_message_with_retry) puisque ce n'est pas une erreur API. Était monté à 24576
-    # (triplé depuis 8192) puis redescendu à 12288 (2026-09-21) : sur le serveur de déploiement
-    # (3.7 Gi RAM, sans swap accessible), une réponse Claude plus longue bufferisée en mémoire
-    # est un facteur de risque OOM direct — voir docs/decisions-et-limites-connues.md.
-    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "12288"))
+    # (_create_message_with_retry) puisque ce n'est pas une erreur API. Triplé depuis 8192,
+    # brièvement redescendu à 12288 le 2026-09-21 (le serveur de déploiement, 3.7 Gi RAM sans
+    # swap accessible, avait subi un OOM-kill — une réponse Claude plus longue bufferisée en
+    # mémoire y est un facteur de risque direct), puis remonté à 24576 le même jour pour le test
+    # local ci-dessous — voir docs/decisions-et-limites-connues.md. Le `.env` du serveur de
+    # production garde sa propre valeur, indépendante de ce défaut de code.
+    MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "24576"))
     # Nombre max d'appels Anthropic simultanés (sémaphore à PRIORITÉ depuis le
     # 2026-09-21, voir claude_service.py: PrioritySemaphore). Protège contre le
     # rate limit Anthropic (429) et les pics de coût lors du traitement parallèle
@@ -54,8 +56,8 @@ class Settings:
     # "OOM en production...". Le compte applicatif n'a pas de droits root sur ce
     # serveur pour ajouter du swap ; à remonter dès que c'est possible.
     #
-    # Remonté à 6 le même jour (ce commit) — mais comme valeur par défaut de
-    # DÉVELOPPEMENT/TEST LOCAL uniquement, pour exercer le nouveau
+    # Remonté à 6 puis redescendu à 3 le même jour (ce commit) — mais comme valeur
+    # par défaut de DÉVELOPPEMENT/TEST LOCAL uniquement, pour exercer le nouveau
     # PrioritySemaphore (ordonnancement par numéro de page + place tenue
     # pendant le backoff de retry, voir _create_message_with_retry) avec
     # suffisamment de pages en vol simultanément pour observer un effet. Le
@@ -63,9 +65,9 @@ class Settings:
     # ANTHROPIC_CONCURRENCY=2 dans son `.env` (qui ne suit pas ce dépôt, voir
     # docs/decisions-et-limites-connues.md) — ce défaut de code n'affecte donc
     # PAS le déploiement actuel, sauf redéploiement depuis un checkout neuf sans
-    # définir la variable. NE PAS déployer 6 en production tant que le swap
-    # n'est pas en place.
-    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "6"))
+    # définir la variable. NE PAS déployer 3 en production tant que le swap
+    # n'est pas en place (la valeur validée pour la RAM disponible reste 2).
+    ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "3"))
     # Délai max (secondes) accordé à UNE tentative d'appel Anthropic avant de la
     # considérer en échec — sans ça, un appel qui ne répond jamais monopoliserait
     # indéfiniment une place du sémaphore ANTHROPIC_CONCURRENCY.

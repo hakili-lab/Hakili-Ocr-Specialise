@@ -111,9 +111,9 @@ pour le contexte complet. Fonctions clés :
 
 - **`PDF_CHUNK_PAGE_COUNT_THRESHOLD = 10`** : au-delà, le flux chunké
   remplace le flux classique.
-- **`PDF_CHUNK_SIZE_PAGES = 12`** (test local — `10` en production, voir
+- **`PDF_CHUNK_SIZE_PAGES = 6`** (test local — `10` en production, voir
   `docs/decisions-et-limites-connues.md`) : pages par morceau, au-dessus
-  d'`ANTHROPIC_CONCURRENCY` (6 en test local / 2 en production, backend) pour
+  d'`ANTHROPIC_CONCURRENCY` (3 en test local / 2 en production, backend) pour
   qu'un morceau sature le sémaphore de traitement pendant que le suivant
   s'envoie.
 - **`loadPdf(file)`** : charge le PDF (`PDFDocument.load`, coûteux sur un gros
