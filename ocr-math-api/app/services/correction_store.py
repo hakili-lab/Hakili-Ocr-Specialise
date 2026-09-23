@@ -7,7 +7,8 @@ tard (analyse, amélioration du prompt OCR).
 
 Stockage en SQLite (stdlib, aucune dépendance supplémentaire) + fichiers image
 sur disque référencés par chemin, cohérent avec le positionnement mono-process
-/ usage personnel déjà acquis par job_store.py.
+de job_store.py — une contrainte du déploiement (instance unique), pas une
+limite d'usage.
 """
 
 import sqlite3

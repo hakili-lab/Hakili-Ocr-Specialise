@@ -48,7 +48,7 @@ router = APIRouter(prefix="/transcribe", tags=["transcription"], dependencies=[D
 _background_tasks: set[asyncio.Task] = set()
 
 
-async def _process_single_image(raw_bytes: bytes, media_type: str, priority: int = 0):
+async def _process_single_image(raw_bytes: bytes, media_type: str):
     """
     Pipeline commun : orientation → resize → base64 → Claude.
     `normalize_orientation`/`resize_for_vision` (PIL) et `encode_bytes_to_base64`
@@ -56,20 +56,13 @@ async def _process_single_image(raw_bytes: bytes, media_type: str, priority: int
     qu'ils ne bloquent la boucle d'événements pendant leur exécution (impact
     direct sur les autres requêtes concurrentes, ex. le polling de statut d'un
     autre job PDF).
-
-    `priority` (défaut 0) est transmis tel quel à `call_anthropic_ocr` — voir son
-    docstring et `claude_service.PrioritySemaphore`. `_process_page_and_track` y
-    passe le numéro de page ; `transcribe_image` (image seule) n'a pas de notion
-    de page et laisse le défaut.
     """
     raw_bytes = await asyncio.to_thread(normalize_orientation, raw_bytes, media_type)
     raw_bytes, image_width, image_height = await asyncio.to_thread(
         resize_for_vision, raw_bytes, media_type
     )
     image_b64 = await asyncio.to_thread(encode_bytes_to_base64, raw_bytes)
-    ocr_result = await call_anthropic_ocr(
-        image_b64, media_type, image_width, image_height, priority=priority
-    )
+    ocr_result = await call_anthropic_ocr(image_b64, media_type, image_width, image_height)
     return ocr_result, image_b64, image_width, image_height
 
 
@@ -150,12 +143,12 @@ async def _process_page_and_track(
     persistants de `job`, accumulés au fil de plusieurs vagues successives,
     pas des listes locales à un seul appel).
 
-    `page_number` sert aussi de priorité de file d'attente au sémaphore Anthropic
-    (`_process_single_image` → `call_anthropic_ocr` → `PrioritySemaphore`, voir
-    `claude_service.py`) : entre plusieurs pages qui attendent une place, la plus
-    petite est servie en premier. Ne garantit pas l'ordre de complétion entre
-    pages déjà en cours d'exécution — voir les limites documentées sur
-    `PrioritySemaphore`/`_create_message_with_retry`.
+    Les pages obtiennent une place du sémaphore Anthropic dans l'ordre
+    d'arrivée à la file (FIFO, `claude_service._get_semaphore`), sans notion
+    de priorité par numéro de page — une page peut donc finir avant une autre
+    de numéro inférieur ; c'est volontaire, voir `useTranscribe.ts` côté
+    frontend, qui affiche chaque page dès qu'elle est prête en indiquant son
+    propre numéro, sans exiger l'ordre.
 
     `job.pages_done` est incrémenté ici, en effet de bord, dès la fin de CETTE
     page — pas après qu'un `gather` englobant ait fini d'attendre toutes les
@@ -168,9 +161,7 @@ async def _process_page_and_track(
     """
     media_type = "image/png"  # convert_pdf_to_images produit du PNG
     try:
-        ocr_result, image_b64, w, h = await _process_single_image(
-            img_bytes, media_type, priority=page_number
-        )
+        ocr_result, image_b64, w, h = await _process_single_image(img_bytes, media_type)
     except anthropic.APIError as exc:
         detail = describe_anthropic_error(exc)
         logger.error("Échec transcription page %d : %s", page_number, detail)
@@ -302,14 +293,14 @@ async def _process_chunk_pages(
     accumule ses résultats au fil de plusieurs vagues de tâches successives,
     une par morceau reçu, pas d'un seul `gather` englobant tout le document.
 
-    La rasterisation était auparavant faite dans `upload_pdf_chunk` lui-même,
-    avant de répondre au client — mais comme le client n'envoie le morceau N+1
-    qu'après avoir reçu la réponse du morceau N (contrat d'envoi séquentiel),
-    ce temps de rendu n'était jamais chevauché avec quoi que ce soit et
-    ajoutait une latence pure sur un gros document (des dizaines de secondes
-    cumulées sur ~25 morceaux pour 500 pages). En la déplaçant ici, dans la
-    tâche de fond, elle se chevauche avec l'envoi du morceau suivant — comme
-    l'était déjà le traitement OCR qui suit. `upload_pdf_chunk` ne fait plus
+    La rasterisation se fait ici, en tâche de fond, plutôt que dans
+    `upload_pdf_chunk` avant de répondre au client : comme le client n'envoie
+    le morceau N+1 qu'après avoir reçu la réponse du morceau N (contrat
+    d'envoi séquentiel), tout temps de rendu passé avant cette réponse
+    ajouterait une latence pure sur un gros document (potentiellement des
+    dizaines de secondes cumulées sur des dizaines de morceaux). En la
+    déportant ici, elle se chevauche avec l'envoi du morceau suivant, comme
+    le fait déjà le traitement OCR qui suit. `upload_pdf_chunk` ne fait donc
     qu'une validation bon marché du nombre de pages (`count_pdf_pages`, qui
     n'ouvre que la structure du PDF, sans rendu de pixel) avant de répondre.
 

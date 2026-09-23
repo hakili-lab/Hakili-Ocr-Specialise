@@ -6,9 +6,9 @@
  * /transcribe/pdf/{job_id}/chunk` (`ocr-math-api/app/routers/transcription.py`). Le seul
  * rasteriseur reste PyMuPDF côté serveur, exactement comme pour un PDF envoyé en un seul
  * morceau — ce module ne rend jamais un pixel, il ne fait que recopier des pages entre
- * documents PDF. Motif nouveau dans le projet (`PDFDocument.create()` + `copyPages`/`addPage`)
- * mais même librairie que `fileTransform.ts` (qui, lui, mute un seul document déjà chargé pour
- * la rotation plutôt que d'en reconstruire de nouveaux).
+ * documents PDF. Utilise la même librairie que `fileTransform.ts`, mais avec un motif
+ * différent : ici on reconstruit de nouveaux documents (`PDFDocument.create()` +
+ * `copyPages`/`addPage`) plutôt que de muter un document déjà chargé.
  */
 import { PDFDocument } from 'pdf-lib';
 import { takeCachedPdfDoc } from './pdfDocCache';
@@ -17,28 +17,20 @@ import { takeCachedPdfDoc } from './pdfDocCache';
  * Au-delà de ce nombre de pages, le PDF est envoyé par morceaux plutôt qu'en un seul POST —
  * voir le choix de flux dans `useTranscribe.ts`. Sous ce seuil, découper n'apporterait rien
  * (juste des allers-retours réseau en plus) : le flux `/pdf/start` classique reste inchangé.
- * Abaissé de 30 à 10 (2026-09-21) : le flux `/pdf/start` rasterise *toutes* les pages avant
- * même de créer le job (voir `start_pdf_transcription`, `transcription.py`) — pour un PDF de
- * taille moyenne, ça retardait le tout premier appel Claude (donc la première page affichée)
- * de la durée totale de rasterisation du document. Le flux chunké rasterise en arrière-plan,
- * morceau par morceau, donc la première page apparaît plus tôt dès qu'on y bascule plus tôt.
+ * Le flux `/pdf/start` rasterise *toutes* les pages avant même de créer le job (voir
+ * `start_pdf_transcription`, `transcription.py`) — pour un PDF de taille moyenne, ça retarde
+ * le tout premier appel Claude (donc la première page affichée) de la durée totale de
+ * rasterisation du document. Le flux chunké rasterise en arrière-plan, morceau par morceau,
+ * donc la première page apparaît plus tôt en gardant ce seuil bas.
  */
 export const PDF_CHUNK_PAGE_COUNT_THRESHOLD = 10;
 
 /**
- * Nombre de pages par morceau — nettement au-dessus d'`ANTHROPIC_CONCURRENCY` pour qu'un
- * morceau sature le sémaphore de traitement pendant que le suivant est envoyé, sans être si
- * gros que la rasterisation d'un morceau devienne elle-même un goulot d'étranglement notable.
- *
- * Historique production : abaissé de 20 à 10 (2026-09-21), en cohérence avec la baisse
- * d'`ANTHROPIC_CONCURRENCY` (6 → 2) suite à l'incident OOM — voir
- * docs/decisions-et-limites-connues.md.
- *
- * Ajusté à 6 le même jour (ce commit) — valeur de TEST LOCAL uniquement, en cohérence avec le
- * retour temporaire d'`ANTHROPIC_CONCURRENCY` à 3 côté backend (2x, même ratio qu'avant) pour
- * exercer le nouveau PrioritySemaphore (voir ocr-math-api/app/services/claude_service.py). Le
- * serveur de production reste sur la paire (concurrence 2, morceaux de 10) tant que le swap
- * n'est pas en place — ne pas redéployer 6 avant confirmation.
+ * Nombre de pages par morceau — nettement au-dessus d'`ANTHROPIC_CONCURRENCY` (backend) pour
+ * qu'un morceau sature le sémaphore de traitement pendant que le suivant est envoyé, sans être
+ * si gros que la rasterisation d'un morceau devienne elle-même un goulot d'étranglement
+ * notable. Cette valeur doit rester coordonnée avec `ANTHROPIC_CONCURRENCY` côté backend
+ * (`ocr-math-api/app/config.py`) plutôt que d'être ajustée indépendamment.
  */
 export const PDF_CHUNK_SIZE_PAGES = 6;
 

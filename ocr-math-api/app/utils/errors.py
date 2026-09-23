@@ -2,8 +2,8 @@
 errors.py
 Assainissement des erreurs *inattendues* renvoyées au client.
 
-Convention (revue sécurité 2026-08-13, item #4) : une exception non prévue ne
-doit jamais voir son `str(exc)` brut renvoyé dans le corps de la réponse HTTP —
+Convention : une exception non prévue ne doit jamais voir son `str(exc)` brut
+renvoyé dans le corps de la réponse HTTP —
 il peut contenir des chemins de fichiers, le schéma/chemin de la base SQLite,
 des bouts de l'entrée fournie ou des internes de librairies (PyMuPDF, PIL,
 WeasyPrint...), ce qui offre gratuitement une carte des internes à quiconque

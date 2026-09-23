@@ -6,9 +6,13 @@
 type ResultHeaderProps = {
   isPdf: boolean;
   currentPageIndex: number;
-  /** Pages effectivement chargées jusqu'ici — borne la navigation (bouton "suivant"). */
-  pagesLoaded: number;
-  /** Nombre total de pages du document — peut dépasser `pagesLoaded` tant que le PDF est encore en cours de traitement. */
+  /**
+   * Nombre total de pages du document — borne la navigation dans les deux sens.
+   * Naviguer vers une page pas encore transcrite est autorisé (voir ResultScreen.tsx,
+   * qui affiche un placeholder "en cours" dans ce cas) : les pages peuvent finir dans
+   * n'importe quel ordre, donc ce n'est plus le nombre de pages déjà chargées qui doit
+   * borner le bouton "suivant".
+   */
   totalPages: number;
   /** Le document a encore des pages en cours de traitement en arrière-plan. */
   isStreaming: boolean;
@@ -24,7 +28,6 @@ type ResultHeaderProps = {
 export function ResultHeader({
   isPdf,
   currentPageIndex,
-  pagesLoaded,
   totalPages,
   isStreaming,
   onPrevPage,
@@ -60,7 +63,7 @@ export function ResultHeader({
           <button
             type="button"
             onClick={onNextPage}
-            disabled={currentPageIndex === pagesLoaded - 1}
+            disabled={currentPageIndex === totalPages - 1}
             className="flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed bg-transparent border-0 p-1"
             aria-label="Page suivante"
           >

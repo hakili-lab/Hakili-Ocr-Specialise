@@ -24,20 +24,16 @@ class Settings:
     # long/haute résolution n'a pas la même échelle qu'une image unique.
     MAX_PDF_SIZE_MB: float = float(os.getenv("MAX_PDF_SIZE_MB", "500"))
     MAX_PDF_PAGES: int = int(os.getenv("MAX_PDF_PAGES", "600"))
-    # Durée (secondes) après laquelle un job PDF terminé (done/error) est
-    # purgé du store en mémoire — évite une croissance indéfinie de job_store
-    # sur un process qui tourne longtemps. Mesuré depuis `job.updated_at`
-    # (rafraîchi à la finalisation du job, voir `_finalize_pdf_job` dans
-    # transcription.py), PAS depuis `job.created_at` : ancrer sur la création
-    # purgerait un job dont le traitement a duré plus longtemps que ce délai
-    # dès l'instant où il se termine, potentiellement avant même le dernier
-    # poll du frontend. Abaissé de 4h à 5 min (2026-09-23) : chaque
-    # `PageResult` conservé embarque l'image complète en base64
-    # (`image_b64`), et le frontend n'a plus besoin de la copie backend une
-    # fois son dernier poll reçu (`refetchInterval` s'arrête dès que
-    # `status !== "processing"`, voir `useTranscribe.ts`) — 5 min couvre la
-    # marge réaliste (poll en cours, onglet dupliqué) sans retenir des
-    # centaines de Mo d'images pendant des heures.
+    # Durée (secondes) après laquelle un job PDF terminé (done/error) est purgé
+    # du store en mémoire, pour éviter une croissance indéfinie de job_store.
+    # Mesurée depuis `job.updated_at` (rafraîchi à la finalisation du job, voir
+    # `_finalize_pdf_job` dans transcription.py), jamais depuis `job.created_at` :
+    # ancrer sur la création purgerait un job dont le traitement a duré plus
+    # longtemps que ce délai dès l'instant où il se termine, potentiellement
+    # avant même le dernier poll du frontend. Chaque `PageResult` conservé
+    # embarque l'image complète en base64 ; le frontend n'a plus besoin de la
+    # copie backend une fois son dernier poll reçu (`refetchInterval` s'arrête
+    # dès que `status !== "processing"`, voir `useTranscribe.ts`).
     JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "300"))
     # Intervalle (secondes) de la tâche de fond qui balaie `job_store` pour
     # purger les jobs expirés (voir job_store.purge_loop, démarrée dans
@@ -53,38 +49,21 @@ class Settings:
     # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
     # done/error). Défaut : 30 min.
     JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
-    # Défaut aligné sur .env.example (24576) : une valeur trop basse risque de tronquer une
-    # réponse verbeuse (page avec un gros tableau) avant la fin du JSON — traité comme un échec
-    # (ValueError, voir claude_service.py), pas retenté automatiquement par le retry Anthropic
-    # (_create_message_with_retry) puisque ce n'est pas une erreur API. Triplé depuis 8192,
-    # brièvement redescendu à 12288 le 2026-09-21 (le serveur de déploiement, 3.7 Gi RAM sans
-    # swap accessible, avait subi un OOM-kill — une réponse Claude plus longue bufferisée en
-    # mémoire y est un facteur de risque direct), puis remonté à 24576 le même jour pour le test
-    # local ci-dessous — voir docs/decisions-et-limites-connues.md. Le `.env` du serveur de
-    # production garde sa propre valeur, indépendante de ce défaut de code.
+    # Une valeur trop basse risque de tronquer une réponse verbeuse (page avec un gros
+    # tableau) avant la fin du JSON — traité comme un échec (ValueError, voir
+    # claude_service.py), jamais retenté automatiquement par le retry Anthropic
+    # (_create_message_with_retry) puisque ce n'est pas une erreur API. Une valeur trop
+    # haute augmente d'autant la mémoire bufferisée par réponse en cours de traitement
+    # parallèle (voir ANTHROPIC_CONCURRENCY) : les deux paramètres doivent être calibrés
+    # ensemble par rapport à la RAM disponible sur le serveur de déploiement.
     MAX_TOKENS: int = int(os.getenv("MAX_TOKENS", "24576"))
-    # Nombre max d'appels Anthropic simultanés (sémaphore à PRIORITÉ depuis le
-    # 2026-09-21, voir claude_service.py: PrioritySemaphore). Protège contre le
-    # rate limit Anthropic (429) et les pics de coût lors du traitement parallèle
-    # des pages d'un PDF (_run_pdf_job).
-    #
-    # Historique production : abaissé de 6 à 2 le 2026-09-21 suite à un OOM-kill
-    # du backend (exit 137) sur le serveur de déploiement (3.7 Gi RAM, sans swap)
-    # pendant un job PDF — voir docs/decisions-et-limites-connues.md, section
-    # "OOM en production...". Le compte applicatif n'a pas de droits root sur ce
-    # serveur pour ajouter du swap ; à remonter dès que c'est possible.
-    #
-    # Remonté à 6 puis redescendu à 3 le même jour (ce commit) — mais comme valeur
-    # par défaut de DÉVELOPPEMENT/TEST LOCAL uniquement, pour exercer le nouveau
-    # PrioritySemaphore (ordonnancement par numéro de page + place tenue
-    # pendant le backoff de retry, voir _create_message_with_retry) avec
-    # suffisamment de pages en vol simultanément pour observer un effet. Le
-    # serveur de production garde sa propre variable d'environnement
-    # ANTHROPIC_CONCURRENCY=2 dans son `.env` (qui ne suit pas ce dépôt, voir
-    # docs/decisions-et-limites-connues.md) — ce défaut de code n'affecte donc
-    # PAS le déploiement actuel, sauf redéploiement depuis un checkout neuf sans
-    # définir la variable. NE PAS déployer 3 en production tant que le swap
-    # n'est pas en place (la valeur validée pour la RAM disponible reste 2).
+    # Nombre max d'appels Anthropic simultanés (asyncio.Semaphore standard, FIFO — voir
+    # claude_service.py: _get_semaphore). Protège contre le rate limit Anthropic (429) et
+    # borne le pic mémoire/coût lors du traitement parallèle des pages d'un PDF
+    # (_run_pdf_job) : chaque appel en vol retient en mémoire l'image envoyée et la
+    # réponse Claude en cours de réception, donc ce paramètre est aussi le principal
+    # levier pour rester sous la RAM disponible du serveur de déploiement — voir
+    # docs/decisions-et-limites-connues.md pour la valeur validée en production.
     ANTHROPIC_CONCURRENCY: int = int(os.getenv("ANTHROPIC_CONCURRENCY", "3"))
     # Délai max (secondes) accordé à UNE tentative d'appel Anthropic avant de la
     # considérer en échec — sans ça, un appel qui ne répond jamais monopoliserait
@@ -93,12 +72,10 @@ class Settings:
     # Nombre de tentatives supplémentaires (après la première) pour une erreur
     # transitoire (429, 5xx, connexion) — gérées nous-mêmes (claude_service.py,
     # _create_message_with_retry) plutôt que par le retry interne du SDK, pour
-    # garder le contrôle du backoff/logging/classification et pour tenir la MÊME
-    # place de PrioritySemaphore pendant toute la séquence de tentatives d'une
-    # page (changé le 2026-09-21 — auparavant la place était relâchée pendant
-    # l'attente de backoff ; inversé pour empêcher qu'une page neuve ne double
-    # dans la file d'attente une page mid-retry, voir le docstring de
-    # `_create_message_with_retry`).
+    # garder le contrôle du backoff/logging/classification. La place de sémaphore
+    # est relâchée pendant l'attente de backoff entre deux tentatives : les pages
+    # sont servies dans l'ordre d'arrivée (FIFO), donc une autre page en attente
+    # peut s'en servir pendant ce temps mort.
     ANTHROPIC_MAX_RETRIES: int = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
     # Délai de base (secondes) du backoff exponentiel entre deux tentatives —
     # doublé à chaque tentative (1, 2, 4, 8...), plus un peu d'aléatoire (jitter)

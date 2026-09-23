@@ -1,15 +1,13 @@
 /**
  * utils/exportPdf.tsx
- * Génère et télécharge un PDF de la transcription. Contrairement à l'ancienne
- * approche (rendu React hors-écran → capture `html2canvas` → image découpée
- * en pages via `jspdf`, un PDF rasterisé sans texte sélectionnable), le rendu
- * React hors-écran (`TranscriptExport`, cf. son propre commentaire) sert
- * uniquement à produire du HTML/KaTeX déjà peint, dont on sérialise le DOM
- * (`.innerHTML`) pour l'envoyer au backend : WeasyPrint (app/services/
- * pdf_export_service.py, ocr-math-api) le convertit en un vrai PDF vectoriel
- * (texte sélectionnable, pagination CSS @page, tableaux qui passent à la
- * ligne au lieu d'être tronqués), tout en noir, marqueurs `==...==` déjà
- * retirés avant rendu par `sanitizeExportPages`.
+ * Génère et télécharge un PDF de la transcription. Le rendu React hors-écran
+ * (`TranscriptExport`, cf. son propre commentaire) sert uniquement à produire
+ * du HTML/KaTeX déjà peint, dont on sérialise le DOM (`.innerHTML`) pour
+ * l'envoyer au backend : WeasyPrint (app/services/pdf_export_service.py,
+ * ocr-math-api) le convertit en un vrai PDF vectoriel (texte sélectionnable,
+ * pagination CSS @page, tableaux qui passent à la ligne au lieu d'être
+ * tronqués), tout en noir, marqueurs `==...==` déjà retirés avant rendu par
+ * `sanitizeExportPages`.
  */
 import { createRoot } from 'react-dom/client';
 import { TranscriptExport } from '../components/result/TranscriptExport';

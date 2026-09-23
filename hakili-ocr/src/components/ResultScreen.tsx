@@ -94,29 +94,33 @@ export default function ResultScreen({ progress = null }: ResultScreenProps) {
     }
   }, [selectedBlockId]);
 
-  if (!transcriptionResult) return null;
-  const { final_warning } = transcriptionResult;
   const isPdf = pdfResult !== null;
-  // Pages effectivement chargées (bornes de navigation) vs nombre total de pages du
-  // document (affichage du header) — distincts tant que le PDF est encore en cours de
-  // traitement en arrière-plan : `pdfResult.pages` ne contient alors que le préfixe
-  // contigu des pages déjà prêtes (voir `useTranscribe.ts`, `takeReadyPagePrefix`).
-  const pagesLoaded = pdfResult?.pages.length ?? 1;
-  const totalPages = pdfResult ? (pdfPagesTotal ?? pagesLoaded) : 1;
+  // Nombre total de pages du document (affichage du header ET borne de navigation) —
+  // l'utilisateur peut naviguer vers n'importe quelle page jusqu'à `totalPages`, y
+  // compris une page pas encore transcrite (affichée en placeholder ci-dessous), puisque
+  // les pages peuvent finir dans n'importe quel ordre.
+  const totalPages = pdfResult ? (pdfPagesTotal ?? pdfResult.pages.length) : 1;
   const isStreaming = isPdf && progress !== null && progress.pagesDone < progress.pagesTotal;
-  // 1 pour une image simple ; sinon le numéro de page tel que produit par PyMuPDF
-  // côté backend (PageResult.page_number), pas juste currentPageIndex + 1 — les
-  // deux coïncident en pratique mais celui-ci reste la source de vérité.
-  const pageNumber = pdfResult ? (pdfResult.pages[currentPageIndex]?.page_number ?? currentPageIndex + 1) : 1;
+  // `currentPageIndex` EST le numéro de page moins 1 par construction (voir AppContext.tsx),
+  // jamais un index dans `pdfResult.pages` — pas besoin de le retrouver via une recherche.
+  const pageNumber = currentPageIndex + 1;
 
   const handleNewImage = () => {
     dispatch({ type: 'RESET' });
   };
 
-  /** Un jeu de blocs par page source, chacun avec son propre numéro de page (colonne "Page" des exports) — une seule entrée pour une image simple. */
+  /**
+   * Un jeu de blocs par page source, chacun avec son propre numéro de page (colonne "Page"
+   * des exports) — une seule entrée pour une image simple. Trié explicitement par numéro de
+   * page : le backend renvoie déjà `pdfResult.pages` dans cet ordre (_build_pdf_result), mais
+   * le tri ici est un filet de sécurité peu coûteux et indépendant de l'ordre de traitement,
+   * pour garantir que l'export reste dans l'ordre des pages quel que soit celui d'arrivée.
+   */
   const buildExportPages = (): { pageNumber: number; blocks: TranscriptionBlock[] }[] =>
     pdfResult
-      ? pdfResult.pages.map((page) => ({ pageNumber: page.page_number, blocks: page.ocr.blocks }))
+      ? [...pdfResult.pages]
+          .sort((a, b) => a.page_number - b.page_number)
+          .map((page) => ({ pageNumber: page.page_number, blocks: page.ocr.blocks }))
       : [{ pageNumber: 1, blocks }];
 
   const handleExportPdf = async () => {
@@ -143,15 +147,44 @@ export default function ResultScreen({ progress = null }: ResultScreenProps) {
 
   const handlePrevPage = () => {
     if (currentPageIndex > 0) {
-      dispatch({ type: 'SET_PAGE', pageIndex: currentPageIndex - 1 });
+      dispatch({ type: 'SET_PAGE', pageNumber: currentPageIndex });
     }
   };
 
   const handleNextPage = () => {
-    if (pdfResult && currentPageIndex < pdfResult.pages.length - 1) {
-      dispatch({ type: 'SET_PAGE', pageIndex: currentPageIndex + 1 });
+    if (currentPageIndex < totalPages - 1) {
+      dispatch({ type: 'SET_PAGE', pageNumber: currentPageIndex + 2 });
     }
   };
+
+  if (!transcriptionResult) {
+    // Page ciblée pas encore transcrite (navigation vers un numéro pas encore prêt) —
+    // reste sur l'écran avec le header actif (navigation/export toujours utilisables)
+    // plutôt que de rendre un écran vide ; se résout tout seul dès que la page arrive
+    // (voir MERGE_PDF_RESULT dans AppContext.tsx).
+    if (!isPdf) return null;
+    return (
+      <div className="h-full w-full flex flex-col">
+        <ResultHeader
+          isPdf={isPdf}
+          currentPageIndex={currentPageIndex}
+          totalPages={totalPages}
+          isStreaming={isStreaming}
+          onPrevPage={handlePrevPage}
+          onNextPage={handleNextPage}
+          onExportExcel={handleExportExcel}
+          isExportingExcel={isExportingExcel}
+          onExportPdf={handleExportPdf}
+          isExportingPdf={isExportingPdf}
+        />
+        <div className="flex-1 flex items-center justify-center gap-2 font-sans text-sm text-ink-muted">
+          <span className="h-1.5 w-1.5 rounded-full bg-action animate-pulse" />
+          Transcription de la page {pageNumber} en cours…
+        </div>
+      </div>
+    );
+  }
+  const { final_warning } = transcriptionResult;
 
   return (
     <EditingCellContext.Provider value={editingCell}>
@@ -160,7 +193,6 @@ export default function ResultScreen({ progress = null }: ResultScreenProps) {
       <ResultHeader
         isPdf={isPdf}
         currentPageIndex={currentPageIndex}
-        pagesLoaded={pagesLoaded}
         totalPages={totalPages}
         isStreaming={isStreaming}
         onPrevPage={handlePrevPage}

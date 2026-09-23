@@ -1,17 +1,14 @@
 """
 claude_service.py
-Logique d'appel à l'API Anthropic pour la transcription OCR de mathématiques manuscrites.
-Reprend fidèlement la logique du script ocr_math_claude.py original.
+Logique d'appel à l'API Anthropic pour la transcription OCR de documents administratifs
+manuscrits ou imprimés (tableaux, formulaires, relevés, listes).
 """
 
 import asyncio
-import heapq
-import itertools
 import json
 import logging
 import random
 import re
-from contextlib import asynccontextmanager
 from functools import lru_cache
 
 import anthropic
@@ -23,136 +20,6 @@ from app.models.schemas import OCRResult
 logger = logging.getLogger(__name__)
 
 
-class PrioritySemaphore:
-    """
-    Sémaphore asyncio à compteur de permis, avec la même sémantique
-    qu'asyncio.Semaphore quand personne n'attend (acquire() décrémente et
-    rend la main immédiatement si une place est libre), mais où, s'il y a
-    plusieurs tâches en attente d'une place à libérer, celle avec la
-    PRIORITÉ LA PLUS BASSE (le plus petit numéro de page) est servie en
-    premier — pas nécessairement celle arrivée en premier (FIFO), à
-    l'inverse d'asyncio.Semaphore dont la file d'attente est une simple
-    deque.
-
-    Pourquoi : sous ANTHROPIC_CONCURRENCY places, les pages d'un job PDF sont
-    lancées toutes en même temps (`asyncio.gather`, voir
-    `_process_page_and_track` dans `transcription.py`) ; sans ordre de
-    priorité, la place libérée par une page terminée va à la première tâche
-    arrivée dans la file du sémaphore, indépendamment de son numéro de page.
-    Le frontend (`takeReadyPagePrefix`, `useTranscribe.ts`) n'affiche que le
-    préfixe CONTIGU de pages prêtes à partir de la page 1 : si la page 1 est
-    reléguée loin dans la file (ex. parce qu'elle vient de tomber en erreur
-    retryable et retente), rien ne s'affiche tant qu'elle n'a pas fini, même
-    si des dizaines de pages suivantes sont déjà transcrites. Prioriser par
-    numéro de page réduit ce risque en faisant remonter la page de plus petit
-    numéro EN ATTENTE dès qu'une place se libère.
-
-    Limite assumée, à connaître avant de "corriger" quoi que ce soit ici :
-    ceci ne priorise que les tâches actuellement EN FILE D'ATTENTE d'une
-    place. Ça ne garantit PAS que la page 1 termine avant les pages 2/3/etc
-    si celles-ci ont déjà obtenu une place et sont EN COURS d'appel réseau au
-    moment où la page 1 se met à attendre — il n'y a alors plus rien à
-    réordonner, ces places sont déjà prises. Combiné à la place tenue
-    pendant tout le backoff de retry (voir `_create_message_with_retry`),
-    cette classe empêche seulement qu'une page qui n'a encore JAMAIS été
-    tentée ne double, dans la file d'attente, une page mid-retry ou une page
-    de plus petit numéro déjà en attente.
-
-    Détails d'implémentation :
-    - File d'attente : tas min (`heapq`) de tuples
-      `(priority, seq, future)`. `seq` (`itertools.count()`) sert
-      uniquement de tie-break FIFO entre deux attentes de même priorité —
-      sans lui, `heapq` comparerait le 3ᵉ élément (la Future, non ordonnable)
-      dès que les deux premiers seraient égaux, ce qui lèverait `TypeError`.
-    - Annulation : si la tâche qui attend est annulée (déconnexion client,
-      arrêt de l'app) AVANT d'avoir reçu sa place (sa Future n'a jamais reçu
-      `set_result`), elle se contente de laisser son entrée dans le tas —
-      celle-ci sera ignorée paresseusement par `_wake_up_next` (elle est
-      `done()` via `cancel()`, sans jamais recevoir de place). `heapq` n'a
-      pas de suppression efficace par valeur, donc pas de retrait actif :
-      accepté, le tas ne peut contenir au pire que le nombre de pages en
-      attente à un instant donné (borné par la taille d'un job), pas un
-      problème à cette échelle. Si sa Future avait DÉJÀ reçu sa place
-      (`set_result` posé par `_wake_up_next` juste avant que l'annulation ne
-      soit livrée par la boucle d'événements — la même course que documente
-      `asyncio.Semaphore` lui-même), cette place ne sera jamais consommée :
-      on la retransmet explicitement au prochain waiter (`_wake_up_next()`
-      dans le `except`) pour ne pas la perdre définitivement.
-    """
-
-    def __init__(self, value: int) -> None:
-        if value < 0:
-            raise ValueError("PrioritySemaphore initial value must be >= 0")
-        self._value = value
-        self._waiters: list[tuple[int, int, "asyncio.Future[None]"]] = []
-        self._counter = itertools.count()
-
-    def locked(self) -> bool:
-        return self._value <= 0
-
-    def _wake_up_next(self) -> None:
-        """Réveille la Future de plus haute priorité (plus petite valeur) encore
-        valide dans le tas, en sautant paresseusement celles déjà `done()`
-        (annulées avant d'avoir reçu de place)."""
-        while self._waiters:
-            _priority, _seq, fut = heapq.heappop(self._waiters)
-            if not fut.done():
-                fut.set_result(None)
-                return
-
-    async def acquire(self, priority: int = 0) -> bool:
-        """
-        Acquiert une place, en attendant si besoin. `priority` détermine
-        l'ordre de service parmi les tâches actuellement EN ATTENTE au
-        moment où une place se libère (plus petit = servi en premier) — voir
-        les limites dans le docstring de la classe. Défaut 0 pour les
-        appelants qui n'ont pas de notion de page (ex. l'image seule,
-        `transcribe_image` → `call_anthropic_ocr` sans argument dédié).
-        """
-        while self._value <= 0:
-            loop = asyncio.get_running_loop()
-            fut: "asyncio.Future[None]" = loop.create_future()
-            heapq.heappush(self._waiters, (priority, next(self._counter), fut))
-            try:
-                await fut
-            except asyncio.CancelledError:
-                if fut.done() and not fut.cancelled():
-                    # Une place nous avait déjà été attribuée (voir docstring
-                    # de la classe) mais on ne la consommera jamais : on la
-                    # retransmet au prochain waiter plutôt que de la perdre.
-                    self._wake_up_next()
-                raise
-        self._value -= 1
-        return True
-
-    def release(self) -> None:
-        self._value += 1
-        self._wake_up_next()
-
-
-@asynccontextmanager
-async def _acquire_priority_slot(priority: int = 0):
-    """
-    Context manager `async with` autour de `PrioritySemaphore.acquire`/
-    `release`, pour garder un style d'appel proche de l'ancien
-    `async with _get_semaphore():` — seule différence : la priorité (numéro
-    de page, ou 0 si aucune notion de page) doit être passée explicitement,
-    ce qu'un simple `async with _get_semaphore():` ne permettait pas
-    d'exprimer.
-
-    Si `semaphore.acquire()` lève (tâche annulée avant d'avoir obtenu de
-    place), l'exception remonte AVANT le `try`/`finally` ci-dessous : aucune
-    place n'a été prise, donc `release()` ne doit pas être appelé — c'est
-    volontairement en dehors du bloc protégé.
-    """
-    semaphore = _get_semaphore()
-    await semaphore.acquire(priority)
-    try:
-        yield
-    finally:
-        semaphore.release()
-
-
 @lru_cache
 def _get_client() -> anthropic.AsyncAnthropic:
     """
@@ -161,21 +28,10 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
     `max_retries=0` désactive le retry automatique du SDK : les tentatives sont
     gérées nous-mêmes dans `_create_message_with_retry`, pour garder le contrôle
-    du backoff/logging/classification des erreurs ET pour tenir la MÊME place de
-    sémaphore (`_get_semaphore`, `PrioritySemaphore`) pendant toute la séquence de
-    tentatives d'une page (voir `_create_message_with_retry`) — avec le retry
-    interne du SDK, impossible d'insérer ce comportement, tout se passerait à
-    l'intérieur d'un seul `await client.messages.create(...)`.
-
-    Historique (changé le 2026-09-21, voir `_create_message_with_retry`) : la
-    place était auparavant relâchée PENDANT le `asyncio.sleep` de backoff entre
-    deux tentatives, justement pour ne pas la monopoliser — inversé depuis
-    l'introduction de `PrioritySemaphore` : garder la place empêche une page
-    neuve de doubler dans la file d'attente une page en train de retenter, au
-    prix d'une place inutilisée (aucun appel réseau en cours) pendant le backoff.
+    du backoff/logging/classification des erreurs.
 
     `timeout` borne la durée d'UNE tentative, pour qu'un appel qui ne répond
-    jamais ne bloque pas indéfiniment cette même place.
+    jamais ne bloque pas indéfiniment une place du sémaphore.
     """
     settings = get_settings()
     return anthropic.AsyncAnthropic(
@@ -186,27 +42,27 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
 
 @lru_cache
-def _get_semaphore() -> PrioritySemaphore:
+def _get_semaphore() -> asyncio.Semaphore:
     """
-    Sémaphore global à PRIORITÉ (partagé par tous les appelants, pas un par job
-    PDF) limitant le nombre d'appels Anthropic en vol simultanément à
+    Sémaphore global (partagé par tous les appelants, pas un par job PDF)
+    limitant le nombre d'appels Anthropic en vol simultanément à
     ANTHROPIC_CONCURRENCY — sans ça, paralléliser les pages d'un PDF
     (_run_pdf_job) enverrait des dizaines d'appels d'un coup et heurterait le
     rate limit Anthropic (429), et deux jobs PDF concurrents (deux utilisateurs)
     cumuleraient leur charge sans limite.
 
-    `PrioritySemaphore` plutôt qu'`asyncio.Semaphore` depuis le 2026-09-21 : sert
-    la place libérée à la tâche EN ATTENTE de plus petit numéro de page plutôt
-    qu'à la première arrivée (FIFO) — voir le docstring de la classe pour le
-    détail et les limites. Les appelants passent leur `priority` via
-    `_acquire_priority_slot`/`_create_message_with_retry`.
+    Les pages sont servies dans l'ordre d'arrivée à la file d'attente (FIFO), sans
+    tenir compte du numéro de page : le frontend affiche chaque page dès qu'elle
+    est prête, avec son propre numéro (voir `useTranscribe.ts`), donc rien n'exige
+    qu'une page de petit numéro passe avant les autres. Seul l'export final
+    (PDF/Excel) doit rester trié par numéro de page, ce que `_build_pdf_result`
+    (transcription.py) garantit indépendamment de l'ordre de traitement.
 
     Créé paresseusement (pas au niveau module) pour que l'instance — et les
-    Future qu'elle crée dans `acquire()` via `asyncio.get_running_loop()` — soit
-    liée à la même event loop que celle réellement utilisée au runtime, même
-    prudence que pour l'ancien `asyncio.Semaphore`.
+    primitives de synchronisation qu'elle crée en interne — soit liée à la
+    même event loop que celle réellement utilisée au runtime.
     """
-    return PrioritySemaphore(get_settings().ANTHROPIC_CONCURRENCY)
+    return asyncio.Semaphore(get_settings().ANTHROPIC_CONCURRENCY)
 
 
 SYSTEM_PROMPT = (
@@ -456,38 +312,16 @@ def _is_retryable_anthropic_error(exc: anthropic.APIError) -> bool:
     return status_code == 429 or (status_code is not None and status_code >= 500)
 
 
-async def _create_message_with_retry(
-    client: anthropic.AsyncAnthropic, priority: int = 0, **create_kwargs
-):
+async def _create_message_with_retry(client: anthropic.AsyncAnthropic, **create_kwargs):
     """
     Enveloppe `client.messages.create(...)` d'une boucle de retry/backoff pour les
     erreurs transitoires (voir `_is_retryable_anthropic_error`).
 
-    Depuis le 2026-09-21 : UNE SEULE place de `PrioritySemaphore` est acquise
-    pour TOUTE la séquence de tentatives d'un appel logique (`async with
-    _acquire_priority_slot(priority):` enveloppe la boucle entière), au lieu
-    d'une place ré-acquise à chaque tentative. Concrètement, l'`asyncio.sleep`
-    de backoff entre deux tentatives se fait maintenant place TENUE, pas
-    relâchée — voir le docstring de `_get_client`, qui détaille l'ancien
-    comportement (inversé ici).
-
-    Pourquoi ce changement : la version précédente relâchait la place pendant
-    le backoff pour ne pas la "monopoliser" — mais ça laissait n'importe
-    quelle page toute neuve, jamais encore tentée, doubler dans la file
-    d'attente une page en train de retenter après une erreur transitoire (429,
-    5xx...), quel que soit son numéro de page. Garder la place pendant tout le
-    backoff élimine ce doublage : cette page ne relâche sa place, donc ne
-    redonne jamais la main à la file d'attente du sémaphore, qu'une fois
-    qu'elle a fini d'essayer — avec succès ou tentatives épuisées.
-
-    Limite assumée : ceci NE garantit PAS qu'une page à petit numéro termine
-    avant une page à numéro plus élevé déjà EN COURS d'exécution sur une autre
-    place au moment où elle se met à attendre — seul l'ORDRE DE LA FILE
-    D'ATTENTE est affecté, pas les tâches déjà en vol. Contrepartie assumée :
-    une des ANTHROPIC_CONCURRENCY places reste inoccupée (aucun appel réseau
-    en cours) pendant chaque backoff, réduisant le débit utile pendant les
-    retries — acceptable puisque les retries restent l'exception (erreurs
-    transitoires), pas la norme.
+    La place de sémaphore (`_get_semaphore`) est acquise pour UNE tentative à la
+    fois, pas pour toute la séquence de retry : relâchée pendant
+    `asyncio.sleep(delay)` du backoff entre deux tentatives, pour qu'une autre
+    page en attente puisse s'en servir pendant ce temps mort plutôt que de la
+    laisser inoccupée.
 
     Une erreur non-retryable, ou la dernière tentative épuisée, est relevée
     telle quelle : les appelants (`call_anthropic_ocr`, puis
@@ -497,29 +331,34 @@ async def _create_message_with_retry(
     """
     settings = get_settings()
     max_attempts = settings.ANTHROPIC_MAX_RETRIES + 1
+    semaphore = _get_semaphore()
 
-    async with _acquire_priority_slot(priority):
-        for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, max_attempts + 1):
+        # `error_class_name` capture le nom de l'exception AVANT la fin du bloc
+        # `except` : Python désaffecte automatiquement la variable liée par
+        # `except ... as exc` à la sortie du bloc (`del exc` implicite), donc
+        # `exc` lui-même ne peut pas être réutilisé plus bas dans le `logger.warning`.
+        error_class_name: str | None = None
+        async with semaphore:
             try:
                 return await client.messages.create(**create_kwargs)
             except anthropic.APIError as exc:
                 if attempt >= max_attempts or not _is_retryable_anthropic_error(exc):
                     raise
-                # Backoff exponentiel (1, 2, 4, 8... × la base configurée) + jitter
-                # aléatoire, pour éviter que plusieurs pages tombées en 429 en même
-                # temps (même compte, même rate limit) ne retentent toutes
-                # exactement au même instant. La place de sémaphore reste TENUE
-                # pendant cette attente (voir docstring ci-dessus) — aucune autre
-                # page ne peut prendre cette place tant que celle-ci n'a pas fini
-                # (succès ou échec final).
-                delay = settings.ANTHROPIC_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
-                delay += random.uniform(0, delay * 0.3)
-                logger.warning(
-                    "Appel Anthropic échoué (tentative %d/%d, %s) — nouvelle "
-                    "tentative dans %.1fs (place de sémaphore conservée).",
-                    attempt, max_attempts, exc.__class__.__name__, delay,
-                )
-                await asyncio.sleep(delay)
+                error_class_name = exc.__class__.__name__
+        # Backoff exponentiel (1, 2, 4, 8... × la base configurée) + jitter
+        # aléatoire, pour éviter que plusieurs pages tombées en 429 en même
+        # temps (même compte, même rate limit) ne retentent toutes
+        # exactement au même instant. Hors du `async with` : la place est
+        # relâchée pendant cette attente, réutilisable par une autre page.
+        delay = settings.ANTHROPIC_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+        delay += random.uniform(0, delay * 0.3)
+        logger.warning(
+            "Appel Anthropic échoué (tentative %d/%d, %s) — nouvelle "
+            "tentative dans %.1fs (place de sémaphore relâchée entre-temps).",
+            attempt, max_attempts, error_class_name, delay,
+        )
+        await asyncio.sleep(delay)
 
 
 async def call_anthropic_ocr(
@@ -527,7 +366,6 @@ async def call_anthropic_ocr(
     media_type: str,
     image_width: int,
     image_height: int,
-    priority: int = 0,
 ) -> OCRResult:
     """
     Envoie l'image (déjà en base64, déjà redimensionnée à image_width x image_height)
@@ -535,14 +373,9 @@ async def call_anthropic_ocr(
     Appel asynchrone (AsyncAnthropic) : ne bloque pas l'event loop FastAPI, ce qui permet
     de traiter plusieurs pages en parallèle (asyncio.gather) côté appelant. Le sémaphore
     global (_get_semaphore) borne le nombre d'appels Anthropic réellement en vol à
-    ANTHROPIC_CONCURRENCY, quel que soit le nombre de tâches qui attendent ici.
-
-    `priority` (défaut 0) est transmis tel quel à `_create_message_with_retry` →
-    `PrioritySemaphore.acquire` : plus la valeur est basse, plus tôt cette page
-    obtient la prochaine place libérée si plusieurs appels attendent en même
-    temps. `_process_page_and_track` (transcription.py) y passe le numéro de
-    page (1-based) ; `transcribe_image` (image seule, pas de notion de page)
-    laisse le défaut 0.
+    ANTHROPIC_CONCURRENCY, quel que soit le nombre de tâches qui attendent ici — servies
+    dans l'ordre d'arrivée (FIFO), sans notion de priorité par page : chaque page
+    s'affiche côté frontend dès qu'elle est prête, quel que soit son numéro.
     """
     settings = get_settings()
     settings.validate()
@@ -552,7 +385,6 @@ async def call_anthropic_ocr(
     try:
         message = await _create_message_with_retry(
             client,
-            priority=priority,
             model=settings.MODEL,
             max_tokens=settings.MAX_TOKENS,
             # `cache_control` marque ce bloc comme réutilisable côté serveur Anthropic :

@@ -1,9 +1,9 @@
 """
 export.py
 Endpoint POST /export/pdf : reçoit le HTML déjà rendu (React + KaTeX) de la
-transcription depuis le frontend et retourne un vrai PDF vectoriel généré par
-WeasyPrint (cf. app/services/pdf_export_service.py pour le pourquoi de cette
-approche — abandon du screenshot html2canvas/jsPDF).
+transcription depuis le frontend et retourne un vrai PDF vectoriel (texte
+sélectionnable, pas une image rasterisée) généré par WeasyPrint — cf.
+app/services/pdf_export_service.py pour le détail de l'approche.
 """
 
 import asyncio

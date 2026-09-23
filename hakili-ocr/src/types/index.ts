@@ -56,12 +56,20 @@ export interface AppState {
   selectedBlockId: number | null;
   /** Non-null uniquement quand le document chargé est un PDF multi-pages. */
   pdfResult: PDFTranscriptionResult | null;
+  /**
+   * Numéro de la page actuellement affichée, moins 1 (0-based) — PAS un index dans
+   * `pdfResult.pages` : les pages peuvent être transcrites (et donc arriver) dans
+   * n'importe quel ordre, donc `pdfResult.pages` n'est pas garanti trié par position
+   * d'arrivée. Pour retrouver la page effectivement affichée, chercher dans
+   * `pdfResult.pages` celle dont `page_number === currentPageIndex + 1` (voir
+   * `findPageByNumber` dans `context/AppContext.tsx`) plutôt que d'indexer directement.
+   */
   currentPageIndex: number;
   /**
    * Nombre total de pages du document PDF, connu dès le premier statut de job (voir
-   * `useTranscribe.ts`), indépendamment du nombre de pages déjà chargées dans
-   * `pdfResult.pages` (qui ne contient que le préfixe contigu des pages prêtes tant que
-   * le job est encore en cours — voir `MERGE_PDF_RESULT`). `null` pour une image simple.
+   * `useTranscribe.ts`), indépendamment du nombre de pages déjà transcrites dans
+   * `pdfResult.pages` tant que le job est encore en cours (voir `MERGE_PDF_RESULT`).
+   * `null` pour une image simple.
    */
   pdfPagesTotal: number | null;
 }
@@ -79,13 +87,16 @@ export type AppAction =
   | { type: 'SET_RESULT'; result: TranscriptionResult; pagesTotal?: number | null }
   /**
    * Ajoute les pages nouvellement prêtes à un `pdfResult` déjà affiché (écran 'result'
-   * déjà atteint), sans toucher à `currentPageIndex`/`selectedBlockId` ni aux pages déjà
-   * chargées/éditées — voir `useTranscribe.ts` (`takeReadyPagePrefix`) pour la garantie
-   * que `result.pages` est toujours une extension du préfixe déjà stocké, jamais un
-   * remplacement de son contenu.
+   * déjà atteint) sans toucher aux pages déjà chargées/éditées — `result.pages` est
+   * toujours une extension (plus de pages, jamais moins) du contenu déjà stocké, jamais
+   * un remplacement de son contenu, mais pas forcément dans l'ordre d'arrivée précédent :
+   * les pages peuvent finir dans n'importe quel ordre. Si la page actuellement affichée
+   * (`currentPageIndex`) vient tout juste de devenir prête, `AppContext.tsx` rafraîchit
+   * aussi `transcriptionResult`/`imagePreviewUrl` pour elle.
    */
   | { type: 'MERGE_PDF_RESULT'; result: PDFTranscriptionResult; pagesTotal?: number | null }
-  | { type: 'SET_PAGE'; pageIndex: number }
+  /** Navigue vers le NUMÉRO de page donné (1-based) — pas un index dans `pdfResult.pages`. */
+  | { type: 'SET_PAGE'; pageNumber: number }
   | { type: 'SELECT_BLOCK'; blockId: number | null }
   | { type: 'UPDATE_BLOCK_MARKDOWN'; blockId: number; markdown: string }
   | { type: 'UPDATE_BLOCK_BBOX'; blockId: number; bbox: BoundingBox }
