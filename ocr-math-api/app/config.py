@@ -26,8 +26,26 @@ class Settings:
     MAX_PDF_PAGES: int = int(os.getenv("MAX_PDF_PAGES", "600"))
     # Durée (secondes) après laquelle un job PDF terminé (done/error) est
     # purgé du store en mémoire — évite une croissance indéfinie de job_store
-    # sur un process qui tourne longtemps. Défaut : 4h.
-    JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "14400"))
+    # sur un process qui tourne longtemps. Mesuré depuis `job.updated_at`
+    # (rafraîchi à la finalisation du job, voir `_finalize_pdf_job` dans
+    # transcription.py), PAS depuis `job.created_at` : ancrer sur la création
+    # purgerait un job dont le traitement a duré plus longtemps que ce délai
+    # dès l'instant où il se termine, potentiellement avant même le dernier
+    # poll du frontend. Abaissé de 4h à 5 min (2026-09-23) : chaque
+    # `PageResult` conservé embarque l'image complète en base64
+    # (`image_b64`), et le frontend n'a plus besoin de la copie backend une
+    # fois son dernier poll reçu (`refetchInterval` s'arrête dès que
+    # `status !== "processing"`, voir `useTranscribe.ts`) — 5 min couvre la
+    # marge réaliste (poll en cours, onglet dupliqué) sans retenir des
+    # centaines de Mo d'images pendant des heures.
+    JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "300"))
+    # Intervalle (secondes) de la tâche de fond qui balaie `job_store` pour
+    # purger les jobs expirés (voir job_store.purge_loop, démarrée dans
+    # main.py) — en plus du balayage opportuniste existant à chaque création
+    # de job, pour que la purge ait lieu même en période sans nouveau job
+    # (sinon un job "done" resterait en mémoire indéfiniment si personne
+    # n'en démarre un nouveau après lui).
+    JOB_PURGE_INTERVAL_SECONDS: int = int(os.getenv("JOB_PURGE_INTERVAL_SECONDS", "60"))
     # Durée (secondes) sans nouveau morceau reçu au-delà de laquelle un job PDF
     # "chunké" (upload_finalized=False) est considéré bloqué et purgé — sans ça,
     # un client qui abandonne un upload par morceaux en cours de route (onglet

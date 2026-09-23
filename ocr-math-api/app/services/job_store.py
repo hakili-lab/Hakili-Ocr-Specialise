@@ -9,6 +9,7 @@ personnel). Pour un déploiement multi-workers, il faudrait un store partagé (R
 """
 
 import asyncio
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -16,6 +17,8 @@ from typing import Optional
 
 from app.config import get_settings
 from app.models.schemas import JobStatus, PageResult, PDFTranscriptionResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -82,30 +85,74 @@ _jobs: dict[str, PDFJob] = {}
 def _purge_expired_jobs() -> None:
     """
     Supprime deux catégories de jobs devenus inutiles :
-    - jobs terminés (done/error) plus vieux que JOB_TTL_SECONDS ;
+    - jobs terminés (done/error) dont `updated_at` (rafraîchi à la
+      finalisation, voir `_finalize_pdf_job`/`transcription.py` — PAS
+      `created_at`, qui ne bouge plus une fois le job créé) date de plus de
+      JOB_TTL_SECONDS. Ancrer sur `created_at` purgerait un job dont le
+      traitement a duré plus longtemps que JOB_TTL_SECONDS dès l'instant où
+      il se termine, potentiellement avant même le dernier poll du frontend.
     - jobs "chunkés" bloqués : upload jamais finalisé (upload_finalized=False)
       et sans nouveau morceau reçu depuis plus de JOB_STALL_TIMEOUT_SECONDS —
       un client qui abandonne un upload par morceaux en cours de route
       laisserait sinon un job "processing" indéfiniment impurgeable, puisque
-      rien ne le fait jamais passer à done/error.
-    Appelé à chaque création de job plutôt que via une tâche planifiée à part :
-    le store est en mémoire de process, donc un balayage opportuniste au fil
-    des créations suffit à empêcher sa croissance indéfinie.
+      rien ne le fait jamais passer à done/error. Restreint aux jobs
+      RÉELLEMENT chunkés (`pages_expected is not None`) : un job "legacy"
+      (`/pdf/start`, fichier complet en un seul POST) a aussi
+      `upload_finalized=False` par défaut et ne le change jamais, mais son
+      `updated_at` n'est pas rafraîchi pendant son traitement (pas de notion
+      de "morceau reçu") — sans cette restriction, un gros PDF legacy qui
+      traite plus longtemps que JOB_STALL_TIMEOUT_SECONDS serait balayé en
+      plein traitement, ce qui n'a rien à voir avec un upload abandonné.
+      Exige aussi `chunks_pending == 0` : `job.updated_at` n'est rafraîchi
+      qu'aux BORNES d'un morceau (réception dans `upload_pdf_chunk`, fin de
+      traitement dans `_process_chunk_pages`), jamais PENDANT que son OCR
+      est en cours — un morceau déjà accepté (`chunks_pending > 0`) mais
+      dont le traitement traîne (429/5xx soutenus, `ANTHROPIC_CONCURRENCY`
+      bas) pourrait sinon être purgé de `_jobs` en plein traitement. La
+      tâche de fond en vol garde une référence Python forte à `job` (elle ne
+      lit jamais `_jobs` à nouveau une fois démarrée) : le job continuerait
+      d'exister et d'accumuler de la mémoire via cette référence orpheline
+      jusqu'à la fin du morceau, tout en étant invisible pour
+      `GET /pdf/status` (404) côté frontend entretemps.
+    Appelée à chaque création de job (balayage opportuniste) ET
+    périodiquement par `purge_loop` (voir plus bas, démarrée dans main.py) —
+    le balayage opportuniste seul laisserait un job expiré en mémoire
+    indéfiniment si personne ne démarre plus jamais de nouveau job après lui.
     """
     settings = get_settings()
     now = time.time()
     expired = [
         job_id
         for job_id, job in _jobs.items()
-        if (job.status in ("done", "error") and now - job.created_at > settings.JOB_TTL_SECONDS)
+        if (job.status in ("done", "error") and now - job.updated_at > settings.JOB_TTL_SECONDS)
         or (
             job.status == "processing"
+            and job.pages_expected is not None
             and not job.upload_finalized
+            and job.chunks_pending == 0
             and now - job.updated_at > settings.JOB_STALL_TIMEOUT_SECONDS
         )
     ]
     for job_id in expired:
         del _jobs[job_id]
+
+
+async def purge_loop(interval_seconds: float) -> None:
+    """
+    Tâche de fond, démarrée une fois au démarrage de l'app (voir le
+    `lifespan` de `main.py`) et vivant jusqu'à l'arrêt du process : appelle
+    `_purge_expired_jobs()` toutes les `interval_seconds`, en plus du
+    balayage opportuniste déjà fait à chaque création de job — pour que la
+    purge ait lieu même pendant une période sans aucun nouveau job. Une
+    exception inattendue dans un passage de purge est loguée mais n'arrête
+    pas la boucle (une purge ratée ne doit pas empêcher les suivantes).
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            _purge_expired_jobs()
+        except Exception:
+            logger.exception("Échec d'un passage de purge_loop (job_store)")
 
 
 def create_job(pages_total: int) -> PDFJob:

@@ -227,7 +227,15 @@ def _finalize_pdf_job(job: PDFJob, results: dict[int, PageResult], warnings: lis
     accumulés. Partagé par `_run_pdf_job` (fin du seul `gather`) et
     `_maybe_finalize_job` (fin du dernier morceau d'un job chunké) pour que les deux
     flux produisent un `PDFTranscriptionResult` strictement identique en forme.
+
+    Rafraîchit `job.updated_at` : c'est ce timestamp (pas `job.created_at`, qui ne
+    bouge plus une fois le job créé) que `_purge_expired_jobs` (`job_store.py`) compare
+    à `JOB_TTL_SECONDS` pour décider quand purger un job terminé. Ancrer le TTL sur la
+    création plutôt que sur la fin du traitement ferait purger un job dont le
+    traitement a duré plus longtemps que JOB_TTL_SECONDS dès l'instant où il se
+    termine — potentiellement avant même que le frontend n'ait fait son dernier poll.
     """
+    job.updated_at = time.time()
     if not results:
         job.status = "error"
         # Dernier message par ordre de page (pas de complétion) réutilisé
@@ -274,6 +282,11 @@ async def _run_pdf_job(job_id: str, page_images: list[tuple[bytes, int, int]]) -
         logger.exception("Échec inattendu du job PDF %s", job_id)
         job.status = "error"
         job.error = "Erreur interne du serveur pendant le traitement du document."
+        # Ce chemin ne passe pas par `_finalize_pdf_job` (qui rafraîchit déjà
+        # `updated_at`) — sans ça, `_purge_expired_jobs` (job_store.py)
+        # mesurerait le TTL depuis `created_at` pour ce job, pas depuis sa
+        # fin réelle.
+        job.updated_at = time.time()
 
 
 async def _process_chunk_pages(
@@ -355,11 +368,30 @@ def _maybe_finalize_job(job: PDFJob) -> None:
     vérifie juste, à sa propre fin, s'IL est celui qui fait passer
     `chunks_pending` à 0 — sûr sans verrou car aucun `await` ne s'intercale
     entre la décrémentation et ce test (une seule boucle d'événements).
+
+    Le `try/except` autour de `_finalize_pdf_job` est nécessaire : c'est
+    appelé depuis le `finally` de `_process_chunk_pages`, une tâche de fond
+    fire-and-forget — sans lui, une exception inattendue ici (ex. donnée
+    corrompue dans `_build_pdf_result`) s'échapperait silencieusement (juste
+    un "Task exception was never retrieved" d'asyncio, invisible pour
+    `/pdf/status`) et laisserait `job.status` bloqué sur `"processing"` POUR
+    TOUJOURS : ni le TTL (ne s'applique qu'à done/error) ni le
+    stall-timeout (exige `upload_finalized=False`, déjà `True` ici) ne
+    peuvent alors purger le job — fuite mémoire permanente doublée d'un
+    polling frontend qui ne s'arrête jamais. Même pattern que le
+    `try/except` de `_run_pdf_job` pour le flux legacy, qui est lui déjà
+    protégé (son `try` englobe l'appel à `_finalize_pdf_job`).
     """
     if job.status != "processing" or not job.upload_finalized or job.chunks_pending > 0:
         return
     job.pages_total = job.pages_received  # corrige l'estimation pages_expected par le compte réel
-    _finalize_pdf_job(job, job.results, job.warnings, job.errors)
+    try:
+        _finalize_pdf_job(job, job.results, job.warnings, job.errors)
+    except Exception:
+        logger.exception("Échec inattendu de la finalisation du job PDF chunké %s", job.job_id)
+        job.status = "error"
+        job.error = "Erreur interne du serveur pendant la finalisation du document."
+        job.updated_at = time.time()
 
 
 @router.post(
