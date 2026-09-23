@@ -18,12 +18,18 @@ from app.models.schemas import (
     PDFJobStartResponse,
     PDFJobStatusResponse,
     PDFTranscriptionResult,
+    FailedPage,
     PageResult,
     PDFChunkedStartRequest,
     PDFChunkAckResponse,
 )
 from app.security import verify_api_key
-from app.services.claude_service import call_anthropic_ocr, describe_anthropic_error, get_anthropic_semaphore
+from app.services.claude_service import (
+    call_anthropic_ocr,
+    describe_anthropic_error,
+    get_anthropic_semaphore,
+    is_fatal_anthropic_error,
+)
 from app.services.job_store import create_job, create_chunked_job, get_job, PDFJob
 from app.utils.errors import log_unexpected
 from app.utils.image_utils import (
@@ -170,7 +176,25 @@ async def _process_page_and_track(
     soit nécessaire (une seule boucle d'événements : rien d'autre ne peut
     s'exécuter entre la lecture et l'écriture de `job.pages_done`, ni entre
     lecture et écriture d'une clé de `results`).
+
+    Si `job.fatal_error` est déjà posé (une page précédente a rencontré une erreur
+    indépendante du contenu — clé API invalide, crédit épuisé, voir
+    `claude_service.is_fatal_anthropic_error`), cette page est sautée sans le
+    moindre appel réseau : chaque page échouerait de toute façon exactement de la
+    même façon. Les pages déjà en plein appel au moment où `fatal_error` est posé
+    ne sont PAS interrompues (pas d'annulation de tâche asyncio en vol) — seules
+    celles qui n'ont pas encore atteint ce point sautent leur tour. `job.cancel_reason`
+    (voir `cancel_pdf_job`) suit exactement la même logique pour un arrêt demandé
+    plutôt que subi.
     """
+    stop_reason = job.fatal_error or job.cancel_reason
+    if stop_reason is not None:
+        message = f"non traitée — traitement interrompu : {stop_reason}"
+        warnings.append((page_number, f"Page {page_number} : {message}"))
+        errors.append((page_number, message))
+        job.pages_done += 1
+        return
+
     media_type = "image/png"  # convert_pdf_to_images produit du PNG
     try:
         ocr_result, image_b64, w, h = await _process_single_image(img_bytes, media_type)
@@ -179,14 +203,26 @@ async def _process_page_and_track(
         logger.error("Échec transcription page %d : %s", page_number, detail)
         warnings.append((page_number, f"Page {page_number} : {detail}"))
         errors.append((page_number, detail))
+        if job.fatal_error is None and is_fatal_anthropic_error(exc):
+            job.fatal_error = detail
     except Exception as exc:
-        # Erreur inattendue (pas une anthropic.APIError — ex. bug de parsing) : trace
-        # complète côté serveur, mais on ne remonte au frontend (via warnings/final_warning
-        # et via errors → job.error si TOUTES les pages échouent) que le *type* d'erreur,
-        # jamais son message — celui-ci peut contenir chemins, schéma SQLite ou bouts de
-        # l'entrée. L'échec reste visible et typé, pas muet, sans divulguer d'interne.
+        # Erreur inattendue (pas une anthropic.APIError — ex. bug de parsing). Trace
+        # complète toujours journalisée côté serveur (logger.exception, juste en dessous).
+        # Ce qui remonte au frontend dépend du type :
+        # - `ValueError`/`RuntimeError` : dans ce codebase, uniquement levées par notre
+        #   propre code (image_utils.py, claude_service.py — troncature max_tokens, JSON
+        #   invalide, clé API manquante...) avec un message déjà rédigé pour l'utilisateur
+        #   final, jamais de détail interne — donc affichable tel quel.
+        # - tout le reste (KeyError, IndexError, bug non prévu...) : le nom de la classe
+        #   Python (ex. "KeyError") n'est ni un renseignement utile ni compréhensible pour
+        #   l'utilisateur — remplacé par une phrase générique en français. Le message brut
+        #   pourrait aussi contenir des chemins, du schéma interne ou des bouts de
+        #   l'entrée, donc jamais affiché.
         logger.exception("Échec transcription page %d", page_number)
-        label = f"échec de la transcription ({type(exc).__name__})"
+        if isinstance(exc, (ValueError, RuntimeError)):
+            label = str(exc)
+        else:
+            label = "Erreur technique inattendue lors du traitement de cette page."
         warnings.append((page_number, f"Page {page_number} : {label}"))
         errors.append((page_number, label))
     else:
@@ -205,7 +241,7 @@ async def _process_page_and_track(
 
 
 def _build_pdf_result(
-    results: dict[int, PageResult], warnings: list[tuple[int, str]]
+    results: dict[int, PageResult], warnings: list[tuple[int, str]], errors: list[tuple[int, str]]
 ) -> PDFTranscriptionResult:
     """
     Construit un `PDFTranscriptionResult` trié par numéro de page à partir des résultats
@@ -214,12 +250,21 @@ def _build_pdf_result(
     `get_pdf_transcription_status` pendant que le job est encore `"processing"` — ce
     qui permet au frontend d'afficher/vérifier les premières pages dès qu'elles sont
     prêtes, sans attendre la fin du document entier.
+
+    `failed_pages` (construit à partir d'`errors`, jamais `warnings`) liste les pages
+    définitivement en échec avec leur raison — `errors` ne contient QUE des échecs
+    (contrairement à `warnings`, qui mélange aussi les `final_warning` de pages
+    réussies), donc pas de filtrage supplémentaire nécessaire ici.
     """
     pages = sorted(results.values(), key=lambda p: p.page_number)
     ordered_warnings = [msg for _pn, msg in sorted(warnings, key=lambda item: item[0])]
+    failed_pages = [
+        FailedPage(page_number=pn, reason=msg) for pn, msg in sorted(errors, key=lambda item: item[0])
+    ]
     return PDFTranscriptionResult(
         pages=pages,
         final_warning="\n".join(ordered_warnings) if ordered_warnings else None,
+        failed_pages=failed_pages,
     )
 
 
@@ -253,7 +298,7 @@ def _finalize_pdf_job(job: PDFJob, results: dict[int, PageResult], warnings: lis
         )
         return
 
-    job.result = _build_pdf_result(results, warnings)
+    job.result = _build_pdf_result(results, warnings, errors)
     job.status = "done"
 
 
@@ -464,15 +509,29 @@ async def get_pdf_transcription_status(job_id: str) -> PDFJobStatusResponse:
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job introuvable.")
+    return _build_job_status_response(job)
 
-    # `job.result` n'est posé qu'à la finalisation (status "done"/"error"). Tant que le
-    # job est encore "processing", on construit un résultat PARTIEL à la volée à partir
-    # des pages déjà accumulées dans `job.results` — permet au frontend d'afficher/
-    # vérifier les premières pages sans attendre la fin du document entier. Coût
-    # négligeable : un simple tri du dict déjà en mémoire, à chaque appel de polling.
+
+def _build_job_status_response(job: PDFJob) -> PDFJobStatusResponse:
+    """
+    Construit le `PDFJobStatusResponse` d'un job existant — partagé par
+    `get_pdf_transcription_status` (polling) et `cancel_pdf_job` (pour que la réponse
+    de l'annulation reflète immédiatement l'état courant, sans obliger le frontend à
+    repoller juste après).
+
+    `job.result` n'est posé qu'à la finalisation (status "done"/"error"). Tant que le
+    job est encore "processing", un résultat PARTIEL est construit à la volée à partir
+    des pages déjà accumulées dans `job.results`/`job.errors` — permet au frontend
+    d'afficher/vérifier les premières pages, ou de connaître les pages déjà en échec
+    (`failed_pages`), sans attendre la fin du document entier. Condition sur
+    `job.errors` en plus de `job.results` : une erreur fatale ou une annulation dès la
+    toute première page peut ne laisser réussir AUCUNE page avant la fin du job, mais
+    `failed_pages` doit rester visible dès que possible dans ce cas aussi. Coût
+    négligeable : un simple tri des dict/listes déjà en mémoire, par appel.
+    """
     result = job.result
-    if result is None and job.status == "processing" and job.results:
-        result = _build_pdf_result(job.results, job.warnings)
+    if result is None and job.status == "processing" and (job.results or job.errors):
+        result = _build_pdf_result(job.results, job.warnings, job.errors)
 
     return PDFJobStatusResponse(
         job_id=job.job_id,
@@ -481,7 +540,37 @@ async def get_pdf_transcription_status(job_id: str) -> PDFJobStatusResponse:
         pages_total=job.pages_total,
         result=result,
         error=job.error,
+        fatal_error=job.fatal_error,
+        cancel_reason=job.cancel_reason,
     )
+
+
+@router.post(
+    "/pdf/{job_id}/cancel",
+    response_model=PDFJobStatusResponse,
+    responses={404: {"model": ErrorResponse, "description": "Job introuvable"}},
+)
+async def cancel_pdf_job(job_id: str) -> PDFJobStatusResponse:
+    """
+    Demande l'arrêt d'un job PDF en cours — bouton "Annuler" explicite côté frontend, ou
+    appel automatique quand la fermeture de l'onglet est détectée (voir
+    `apiClient.ts`: `sendKeepaliveRequest`, appelé au `pagehide`). Même mécanique que
+    `job.fatal_error` (voir `_process_page_and_track`) : les pages pas encore lancées
+    sont sautées, celles déjà en plein appel réseau se terminent normalement — pas
+    d'annulation de tâche asyncio en vol, pour rester cohérent avec le choix déjà fait
+    pour les erreurs fatales.
+
+    Idempotent et sans effet sur un job déjà terminé ou déjà annulé/fatal — annuler
+    plusieurs fois, ou annuler un job qui vient de se terminer entretemps, ne lève
+    jamais d'erreur, renvoie simplement l'état courant.
+    """
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job introuvable.")
+    if job.status == "processing" and job.cancel_reason is None and job.fatal_error is None:
+        job.cancel_reason = "Transcription annulée."
+        job.updated_at = time.time()
+    return _build_job_status_response(job)
 
 
 # ─── Upload PDF par morceaux (chunked) ──────────────────────────────────

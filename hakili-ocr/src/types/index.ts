@@ -115,10 +115,18 @@ export interface PageResult {
   ocr: TranscriptionResult;
 }
 
+/** Une page définitivement en échec (tentatives épuisées, troncature, rasterisation, ou job arrêté). */
+export interface FailedPage {
+  page_number: number;
+  reason: string;
+}
+
 /** Réponse complète une fois toutes les pages d'un PDF transcrites. */
 export interface PDFTranscriptionResult {
   pages: PageResult[];
   final_warning?: string;
+  /** Pages qui ont définitivement échoué — voir `FailedPage`. Toujours présent côté backend (`default_factory=list`), jamais `undefined`. */
+  failed_pages: FailedPage[];
 }
 
 /** Union des deux formes de payload que peut renvoyer une transcription (image seule ou PDF). */
@@ -161,6 +169,16 @@ export interface PdfJobStatusResponse {
   result?: PDFTranscriptionResult;
   /** Présent uniquement quand `status === 'error'`. */
   error?: string;
+  /**
+   * Peut être présent AVANT `"done"`/`"error"` : dès qu'une page rencontre une erreur
+   * indépendante de son contenu (clé API invalide, crédit épuisé...), le job cesse de
+   * lancer de nouvelles pages mais laisse terminer celles déjà en vol — `status` reste
+   * `"processing"` jusqu'à leur fin, alors que `fatal_error` est déjà exploitable pour
+   * prévenir l'utilisateur sans attendre.
+   */
+  fatal_error?: string;
+  /** Même logique que `fatal_error`, mais pour un arrêt demandé (bouton Annuler, ou fermeture de l'onglet) plutôt que subi. */
+  cancel_reason?: string;
 }
 
 // === Types upload PDF par morceaux (gros documents, voir utils/pdfChunking.ts) ===

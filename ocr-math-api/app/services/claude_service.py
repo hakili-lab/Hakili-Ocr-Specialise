@@ -194,11 +194,14 @@ def inject_confidence_column(markdown: str, confidence: int) -> str:
 def describe_anthropic_error(exc: anthropic.APIError) -> str:
     """
     Message destiné à l'utilisateur final pour une erreur API Anthropic — classé
-    par type/`status_code` plutôt que de renvoyer le JSON brut de l'API
-    (illisible, non actionnable) ou un message générique qui masquerait la vraie
-    cause. Couvre aussi bien les erreurs non-retryables (échouent immédiatement,
-    voir `_is_retryable_anthropic_error`) que les erreurs transitoires qui ont
-    épuisé leurs tentatives dans `_create_message_with_retry` — dans les deux
+    par type/`status_code` plutôt que de renvoyer le JSON brut de l'API (illisible,
+    plein de jargon technique — noms de champs, codes internes) ou un message
+    générique qui masquerait la vraie cause. Chaque branche renvoie une phrase en
+    français compréhensible sans connaissance technique ; le détail brut d'Anthropic,
+    quand il existe, est journalisé côté serveur (`logger.error`) pour le diagnostic,
+    jamais affiché tel quel. Couvre aussi bien les erreurs non-retryables (échouent
+    immédiatement, voir `_is_retryable_anthropic_error`) que les erreurs transitoires
+    qui ont épuisé leurs tentatives dans `_create_message_with_retry` — dans les deux
     cas, cette fonction est le seul endroit qui traduit l'exception en message
     affiché côté frontend (transcription.py : `transcribe_image` et
     `_process_page_and_track`), donc étendre la classification ici suffit à
@@ -237,12 +240,24 @@ def describe_anthropic_error(exc: anthropic.APIError) -> str:
     if isinstance(exc, anthropic.RequestTooLargeError):
         return "Le document envoyé est trop volumineux pour être traité par le service de transcription."
     if isinstance(exc, anthropic.BadRequestError):
-        return f"La requête envoyée au service de transcription est invalide : {exc}"
-    # Erreur non classée explicitement (404, 409, 422...) : `str(exc)` reste le
-    # dernier recours plutôt qu'un message générique qui masquerait la cause —
-    # les erreurs de l'API Anthropic sont déjà des messages lisibles, pas des
-    # traces internes.
-    return str(exc)
+        # Le détail brut d'Anthropic (souvent du jargon d'API : noms de champs, codes
+        # internes) est journalisé côté serveur pour le diagnostic, mais jamais montré
+        # tel quel à l'utilisateur — un message générique compréhensible suffit ici,
+        # l'administrateur retrouve le détail dans les logs si besoin.
+        logger.error("Requête Anthropic invalide (400 non classé) : %s", exc)
+        return (
+            "La requête envoyée au service de transcription est invalide. "
+            "Contactez l'administrateur si le problème persiste."
+        )
+    # Erreur non classée explicitement (404, 409, 422...) : le détail brut d'Anthropic
+    # est journalisé côté serveur (pas montré à l'utilisateur, qui n'a aucun moyen d'agir
+    # dessus — ce n'est ni un code HTTP ni un texte d'API que l'utilisateur final peut
+    # interpréter).
+    logger.error("Erreur Anthropic non classée (status_code=%s) : %s", status_code, exc)
+    return (
+        "Le service de transcription a rencontré un problème inattendu. Réessayez dans "
+        "quelques instants, ou contactez l'administrateur si cela persiste."
+    )
 
 
 def _is_blank_table_row_block(markdown: str) -> bool:
@@ -308,6 +323,20 @@ def parse_claude_response(text: str, image_width: int, image_height: int) -> OCR
         raise ValueError(
             "La réponse de Claude ne respecte pas le format attendu (schéma invalide)."
         ) from exc
+
+
+def is_fatal_anthropic_error(exc: anthropic.APIError) -> bool:
+    """
+    Erreurs indépendantes de la page en cours : la clé API, le compte ou ses droits
+    sont en cause, donc chaque page échouerait exactement de la même façon. Distinct de
+    `_is_retryable_anthropic_error` (qui décide si UNE tentative vaut la peine d'être
+    retentée) : celui-ci décide si le JOB entier doit cesser de lancer de nouvelles
+    pages plutôt que de laisser chacune échouer indépendamment pour la même raison.
+    """
+    if isinstance(exc, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+        return True
+    status_code = getattr(exc, "status_code", None)
+    return status_code == 400 and "credit balance" in str(exc).lower()
 
 
 def _is_retryable_anthropic_error(exc: anthropic.APIError) -> bool:

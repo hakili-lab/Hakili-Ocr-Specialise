@@ -29,6 +29,21 @@ class PDFJob:
     status: JobStatus = "processing"
     result: Optional[PDFTranscriptionResult] = None
     error: Optional[str] = None
+    # Posé dès qu'une page rencontre une erreur Anthropic indépendante de son contenu
+    # (clé API invalide, crédit épuisé...) — voir `claude_service.is_fatal_anthropic_error`
+    # et `_process_page_and_track` (transcription.py). Distinct de `error` : celui-ci
+    # n'est renseigné qu'à la finalisation du job (toutes pages traitées), alors que
+    # `fatal_error` doit être exploitable par le frontend dès sa détection, pendant que
+    # `status` est encore `"processing"` (les pages déjà en vol continuent normalement,
+    # mais plus aucune nouvelle page n'est lancée — voir `_process_page_and_track`).
+    fatal_error: Optional[str] = None
+    # Posé par POST /transcribe/pdf/{job_id}/cancel (annulation explicite via le bouton, ou
+    # automatique quand le frontend détecte la fermeture de l'onglet — voir apiClient.ts:
+    # sendKeepaliveRequest) — même mécanique que `fatal_error` : les pages pas encore lancées
+    # sont sautées (voir _process_page_and_track), celles déjà en plein appel réseau se
+    # terminent normalement. Un seul des deux champs suffit à interrompre le job ; les deux
+    # sont distincts pour que le frontend affiche un message adapté à la cause réelle.
+    cancel_reason: Optional[str] = None
     created_at: float = field(default_factory=time.time)
 
     # --- Champs utilisés uniquement par un job "chunké" (upload par morceaux,

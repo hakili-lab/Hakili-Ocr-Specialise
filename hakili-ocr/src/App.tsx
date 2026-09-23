@@ -14,7 +14,8 @@ import ResultScreen from './components/ResultScreen';
 
 export default function App() {
   const { state, dispatch } = useApp();
-  const { start, isPending, isError, error, progress, data } = useTranscription();
+  const { start, isPending, isError, error, progress, data, fatalError, failedPages, isConnectionIssue, cancelReason, cancel } =
+    useTranscription();
 
   // Déclenche la transcription dès qu'on entre sur l'écran de chargement avec un fichier prêt.
   useEffect(() => {
@@ -35,6 +36,17 @@ export default function App() {
       dispatch({ type: 'SET_RESULT', result: data });
       return;
     }
+    // Tant qu'aucune page n'a encore réussi, ne jamais router vers l'écran résultat — un
+    // job PDF peut exposer un résultat partiel avec `pages: []` avant que `status` ne
+    // passe à `"done"`/`"error"` (une erreur fatale ou des pages en échec dès le début du
+    // traitement, voir `useTranscribe.ts`/`fatalError`/`failedPages`). `SET_RESULT` avec
+    // `pages: []` laisserait `transcriptionResult` à `null`, et cet écran ne rend
+    // `ResultScreen` que si `transcriptionResult` est non-null — sans ce garde, l'app
+    // resterait bloquée sur un écran vide. Dans ce cas précis (aucune page encore
+    // réussie), `LoadingScreen` reste affiché avec son message d'erreur générique
+    // existant (`isError`/`error`, basé sur `job.error` une fois le job finalisé) —
+    // le modal dédié `JobIssuesModal` ne prend le relais qu'une fois sur l'écran résultat.
+    if (data.pages.length === 0) return;
     const pagesTotal = progress?.pagesTotal ?? null;
     if (state.pdfResult) {
       dispatch({ type: 'MERGE_PDF_RESULT', result: data, pagesTotal });
@@ -79,9 +91,21 @@ export default function App() {
             </button>
           )}
           {state.currentScreen === 'loading' && !isError && (
-            <span className="font-sans font-medium text-base text-ink-muted opacity-40 cursor-not-allowed">
+            <button
+              type="button"
+              onClick={() => {
+                // Rien à afficher tant qu'aucune page n'est encore prête (voir le garde sur
+                // `data.pages.length === 0` plus haut) — annuler ici renvoie directement à
+                // l'écran de dépôt plutôt que d'attendre une confirmation qui n'aurait rien à
+                // montrer. `cancel()` est un no-op silencieux si aucun job PDF n'est actif
+                // (image simple, ou job pas encore créé).
+                cancel();
+                dispatch({ type: 'RESET' });
+              }}
+              className="font-sans font-medium text-base text-ink-muted cursor-pointer bg-transparent border-0"
+            >
               Annuler
-            </span>
+            </button>
           )}
         </header>
       )}
@@ -103,8 +127,28 @@ export default function App() {
             <LoadingScreen isError={isError} error={error} />
           </div>
         )}
-        {state.currentScreen === 'result' && state.transcriptionResult && (
-          <ResultScreen progress={progress} />
+        {/*
+          Ne PAS ajouter `&& state.transcriptionResult` ici : `currentScreen` ne passe à
+          `'result'` que lorsque `transcriptionResult` est déjà garanti non-null (via
+          SET_RESULT, dont le déclenchement est lui-même gardé plus haut), mais une fois
+          sur cet écran, `SET_PAGE` (navigation vers une page pas encore transcrite, voir
+          AppContext.tsx) remet légitimement `transcriptionResult` à `null` — un tel garde
+          démonterait alors `ResultScreen` entièrement, alors que c'est justement ce
+          composant qui sait afficher le placeholder "page en cours"/"page en échec" pour
+          ce cas. Avec le garde, l'écran devient blanc silencieusement (bug vérifié et
+          corrigé) ; sans lui, ResultScreen gère `transcriptionResult === null` lui-même.
+        */}
+        {state.currentScreen === 'result' && (
+          <ResultScreen
+            progress={progress}
+            isError={isError}
+            error={error}
+            fatalError={fatalError}
+            failedPages={failedPages}
+            isConnectionIssue={isConnectionIssue}
+            cancelReason={cancelReason}
+            onCancel={cancel}
+          />
         )}
       </main>
     </div>

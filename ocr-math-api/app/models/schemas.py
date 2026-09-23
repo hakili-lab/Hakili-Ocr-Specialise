@@ -73,11 +73,19 @@ class PageResult(BaseModel):
     ocr: OCRResult
 
 
+class FailedPage(BaseModel):
+    """Une page définitivement en échec (tentatives épuisées, troncature, rasterisation, ou job arrêté)."""
+
+    page_number: int
+    reason: str
+
+
 class PDFTranscriptionResult(BaseModel):
     """Résultat complet d'un PDF multi-pages."""
 
     pages: list[PageResult]
     final_warning: Optional[str] = None
+    failed_pages: list[FailedPage] = Field(default_factory=list)
 
 
 class TranscriptionResponse(BaseModel):
@@ -112,6 +120,15 @@ class PDFJobStatusResponse(BaseModel):
     les premières pages pendant que les suivantes continuent d'être traitées en
     arrière-plan. `status` reste la seule source de vérité pour savoir si le document
     entier est terminé — ne pas déduire "terminé" de la simple présence de `result`.
+
+    `fatal_error` peut lui aussi être non-null AVANT `"done"`/`"error"` : dès qu'une
+    page rencontre une erreur indépendante du contenu (clé API invalide, crédit
+    épuisé...), le job cesse de lancer de nouvelles pages mais laisse terminer celles
+    déjà en vol — `status` reste `"processing"` jusqu'à leur fin, alors que
+    `fatal_error` est déjà exploitable pour prévenir l'utilisateur sans attendre.
+
+    `cancel_reason` suit la même logique que `fatal_error` mais pour un arrêt demandé
+    (bouton Annuler, ou fermeture de l'onglet détectée côté frontend) plutôt que subi.
     """
 
     job_id: str
@@ -120,6 +137,8 @@ class PDFJobStatusResponse(BaseModel):
     pages_total: int
     result: Optional[PDFTranscriptionResult] = None
     error: Optional[str] = None
+    fatal_error: Optional[str] = None
+    cancel_reason: Optional[str] = None
 
 
 class PDFChunkedStartRequest(BaseModel):

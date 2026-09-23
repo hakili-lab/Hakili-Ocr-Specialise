@@ -27,15 +27,33 @@ export class TranscribeError extends Error {
   }
 }
 
+/**
+ * Message de repli quand la réponse d'erreur n'a pas de `detail` JSON exploitable (ex. le
+ * backend est injoignable et une infrastructure intermédiaire — proxy, plateforme d'hébergement
+ * — renvoie sa propre page d'erreur générique). Jamais le code HTTP brut affiché tel quel
+ * (`"Erreur 429"`, `"Erreur 500"`...) : ce n'est pas compréhensible sans connaissance technique,
+ * et le vrai détail (quand le backend en fournit un) prend de toute façon le dessus juste en
+ * dessous via `errorData.detail`.
+ */
+function defaultMessageForStatus(status: number): string {
+  if (status === 404) return 'Ressource introuvable.';
+  if (status === 422) return 'Les données envoyées ne sont pas valides.';
+  if (status === 429) return 'Trop de demandes en même temps. Réessayez dans quelques instants.';
+  if (status >= 500) return 'Le serveur a rencontré un problème. Réessayez dans quelques instants.';
+  return 'Une erreur est survenue. Réessayez.';
+}
+
 /** Lève une `TranscribeError` classée par code HTTP à partir d'une `Response` en échec — partagé par `fetchApi`/`fetchApiBlob`. */
 async function throwHttpError(response: Response): Promise<never> {
-  let errorMessage = `Erreur ${response.status}`;
+  let errorMessage = defaultMessageForStatus(response.status);
   try {
     const errorData = await response.json();
     if (errorData.detail) errorMessage = errorData.detail;
   } catch {
-    const text = await response.text().catch(() => 'Erreur inconnue');
-    errorMessage = text || errorMessage;
+    const text = await response.text().catch(() => '');
+    // Un corps texte brut (page d'erreur HTML d'un proxy, etc.) n'est pas plus lisible que le
+    // message de repli — on ne le montre que s'il ressemble à une phrase courte, jamais un blob.
+    if (text && text.length < 200 && !text.trimStart().startsWith('<')) errorMessage = text;
   }
 
   if (response.status === 400) throw new TranscribeError(errorMessage, 400, false);
@@ -80,6 +98,19 @@ async function doFetch(path: string, init?: RequestInit): Promise<Response> {
 /** `fetch` vers `API_BASE + path`, avec parsing/erreurs déjà normalisés — voir `parseJsonOrThrow`. */
 export async function fetchApi<T>(path: string, init?: RequestInit): Promise<T> {
   return parseJsonOrThrow<T>(await doFetch(path, init));
+}
+
+/**
+ * Requête "best effort" destinée à survivre à la fermeture de la page (ex. annuler un job
+ * PDF quand l'utilisateur ferme l'onglet, voir `useTranscribe.ts`) — `fetch(..., { keepalive:
+ * true })` plutôt que `navigator.sendBeacon` : `sendBeacon` ne permet pas d'ajouter de headers
+ * personnalisés, or le backend exige `X-API-Key` sur cette route ; `keepalive` le permet tout
+ * en offrant la même garantie de survie à la fermeture de l'onglet. Échec réseau ignoré
+ * délibérément (pas de retry, pas de throw) : la page est de toute façon en train de se
+ * fermer, personne ne verra un message d'erreur.
+ */
+export function sendKeepaliveRequest(path: string): void {
+  fetch(`${API_BASE}${path}`, { method: 'POST', keepalive: true, headers: buildHeaders() }).catch(() => {});
 }
 
 /** Comme `fetchApi`, mais pour une réponse binaire (ex. le PDF généré par `POST /export/pdf`) plutôt que du JSON. */

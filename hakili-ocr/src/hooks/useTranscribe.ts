@@ -6,7 +6,7 @@
  * `useTranscription` plus bas. Inclut aussi un mode mock (`USE_MOCK`) pour
  * développer l'UI sans backend ni clé API Anthropic.
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type {
   ApiResponse,
@@ -17,8 +17,9 @@ import type {
   PdfJobStatusResponse,
   PdfChunkedStartRequest,
   PdfChunkAckResponse,
+  FailedPage,
 } from '../types';
-import { fetchApi, TranscribeError } from '../services/apiClient';
+import { fetchApi, sendKeepaliveRequest, TranscribeError } from '../services/apiClient';
 import { loadPdf, splitLoadedPdfIntoChunks, PDF_CHUNK_PAGE_COUNT_THRESHOLD, PDF_CHUNK_SIZE_PAGES } from '../utils/pdfChunking';
 
 export { TranscribeError };
@@ -75,6 +76,7 @@ const MOCK_PDF_RESULT: PDFTranscriptionResult = {
     },
   ],
   final_warning: undefined,
+  failed_pages: [],
 };
 
 /** Simule une transcription (image ou PDF) avec un délai fixe, pour le mode `USE_MOCK`. */
@@ -109,6 +111,17 @@ async function startPdfJob(file: File): Promise<PdfJobStartResponse> {
 /** GET /transcribe/pdf/status/{jobId} : un point de polling, appelé en boucle par `useQuery` ci-dessous. */
 async function fetchPdfJobStatus(jobId: string): Promise<PdfJobStatusResponse> {
   return fetchApi<PdfJobStatusResponse>(`/transcribe/pdf/status/${jobId}`);
+}
+
+/**
+ * POST /transcribe/pdf/{jobId}/cancel : demande l'arrêt d'un job PDF en cours (bouton
+ * "Annuler" explicite) — idempotent côté backend, ne lève jamais si le job est déjà
+ * terminé. Utilisé ici pour l'arrêt volontaire ; la fermeture de l'onglet passe par
+ * `sendKeepaliveRequest` directement (voir l'effet `pagehide` plus bas), pas par cette
+ * fonction, car `fetch` normal n'a aucune garantie de survivre à la fermeture de la page.
+ */
+async function cancelPdfJob(jobId: string): Promise<PdfJobStatusResponse> {
+  return fetchApi<PdfJobStatusResponse>(`/transcribe/pdf/${jobId}/cancel`, { method: 'POST' });
 }
 
 /**
@@ -155,6 +168,38 @@ export interface UseTranscriptionResult {
   /** Progression réelle (page par page), uniquement disponible pour un PDF multi-pages. */
   progress: TranscriptionProgress | null;
   data: TranscriptionPayload | null;
+  /**
+   * Non-null dès qu'une page a rencontré une erreur indépendante de son contenu (clé API
+   * invalide, crédit épuisé...) — le job a cessé de lancer de nouvelles pages, mais peut
+   * encore être `"processing"` le temps que les pages déjà en vol terminent. `null` pour
+   * une image simple.
+   */
+  fatalError: string | null;
+  /** Pages définitivement en échec (tentatives épuisées, troncature, rasterisation). Toujours `[]` pour une image simple. */
+  failedPages: FailedPage[];
+  /**
+   * Le polling lui-même échoue actuellement (backend injoignable, réseau coupé) — DISTINCT
+   * de `isError` : `isError` reste nécessaire tel quel pour `LoadingScreen` (qui doit
+   * pouvoir sortir l'utilisateur d'une perte de connexion survenant avant la toute première
+   * page, sinon `refetchInterval` s'arrête et le spinner reste bloqué indéfiniment sans
+   * signal). Une fois sur l'écran résultat, `isConnectionIssue` permet d'afficher un
+   * indicateur non-bloquant (transitoire, react-query retente automatiquement) plutôt que
+   * le modal réservé aux échecs définitifs. Toujours `false` hors flux PDF.
+   */
+  isConnectionIssue: boolean;
+  /**
+   * Même logique que `fatalError`, mais pour un arrêt demandé plutôt que subi — posé par
+   * `cancel()` (bouton "Annuler") ou par la fermeture de l'onglet (voir l'effet `pagehide`
+   * ci-dessous). `null` pour une image simple.
+   */
+  cancelReason: string | null;
+  /**
+   * Demande l'arrêt du job PDF en cours (no-op si aucun job actif) — les pages déjà en
+   * plein appel réseau au moment de la demande se terminent normalement, seules les
+   * suivantes sont sautées (voir `is_fatal_anthropic_error`/`cancel_pdf_job` côté backend,
+   * même mécanique). No-op pour une image simple (pas de job à annuler).
+   */
+  cancel: () => void;
 }
 
 /**
@@ -181,6 +226,46 @@ export function useTranscription(): UseTranscriptionResult {
     enabled: pdfJobId !== null && !USE_MOCK,
     refetchInterval: (query) => (query.state.data?.status === 'processing' ? PDF_POLL_INTERVAL_MS : false),
   });
+
+  // Refs tenues à jour à chaque rendu (pas via useEffect — une simple affectation pendant
+  // le rendu suffit pour des valeurs déjà disponibles) : le gestionnaire `pagehide`
+  // ci-dessous est enregistré une seule fois (tableau de dépendances vide) mais doit lire
+  // le `pdfJobId`/statut COURANT au moment où l'onglet se ferme, pas celui de sa création.
+  const pdfJobIdRef = useRef<string | null>(null);
+  pdfJobIdRef.current = pdfJobId;
+  const jobStatusRef = useRef<PdfJobStatusResponse['status'] | null>(null);
+  jobStatusRef.current = statusQuery.data?.status ?? null;
+
+  // Annule côté backend le job en cours si l'onglet se ferme (ou se recharge — aucune
+  // distinction fiable n'existe entre les deux depuis un gestionnaire `pagehide`) pendant
+  // qu'il est encore "processing" : sans ça, un job survit à la fermeture de l'onglet et
+  // continue de consommer l'API Anthropic alors que plus personne ne peut voir le résultat
+  // ni le récupérer (aucun mécanisme de reprise de job après un rechargement aujourd'hui —
+  // `pdfJobId` n'est jamais persisté). `sendKeepaliveRequest` (pas `cancelPdfJob`/`fetchApi`
+  // normal) : seul `fetch(..., { keepalive: true })` a une chance raisonnable d'aboutir une
+  // fois la page en train de se fermer. Best-effort assumé, pas une garantie absolue (crash
+  // navigateur, perte réseau au même instant...) — un filet de sécurité plus robuste (ex.
+  // purge d'un job non pollé depuis longtemps côté serveur) resterait à ajouter séparément
+  // si ce best-effort s'avère insuffisant en pratique.
+  useEffect(() => {
+    const handlePageHide = () => {
+      const jobId = pdfJobIdRef.current;
+      if (jobId && jobStatusRef.current === 'processing') {
+        sendKeepaliveRequest(`/transcribe/pdf/${jobId}/cancel`);
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, []);
+
+  const cancel = useCallback(() => {
+    const jobId = pdfJobIdRef.current;
+    if (!jobId) return;
+    cancelPdfJob(jobId)
+      .then(() => statusQuery.refetch())
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Résultat réellement affichable à cet instant : le backend expose déjà, à chaque poll,
   // exactement les pages transcrites jusqu'ici — triées par page_number mais pas forcément
@@ -296,6 +381,11 @@ export function useTranscription(): UseTranscriptionResult {
         error: null,
         progress: null,
         data: mockPdfResult,
+        fatalError: null,
+        failedPages: [],
+        isConnectionIssue: false,
+        cancelReason: null,
+        cancel: () => {},
       };
     }
 
@@ -317,6 +407,11 @@ export function useTranscription(): UseTranscriptionResult {
           : statusQuery.error ?? null),
       progress: jobStatus ? { pagesDone: jobStatus.pages_done, pagesTotal: jobStatus.pages_total } : null,
       data: streamedResult,
+      fatalError: jobStatus?.fatal_error ?? null,
+      failedPages: streamedResult?.failed_pages ?? [],
+      isConnectionIssue: statusQuery.isError,
+      cancelReason: jobStatus?.cancel_reason ?? null,
+      cancel,
     };
   }
 
@@ -327,5 +422,10 @@ export function useTranscription(): UseTranscriptionResult {
     error: imageMutation.error,
     progress: null,
     data: imageMutation.data ?? null,
+    fatalError: null,
+    failedPages: [],
+    isConnectionIssue: false,
+    cancelReason: null,
+    cancel: () => {},
   };
 }

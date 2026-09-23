@@ -22,9 +22,11 @@ type ResultHeaderProps = {
   isExportingExcel: boolean;
   onExportPdf: () => void;
   isExportingPdf: boolean;
+  /** Demande l'arrêt du job en cours — bouton affiché seulement tant que `isStreaming`. */
+  onCancel: () => void;
 };
 
-/** Logo + navigation de pages (PDF) + actions (Exporter Excel / Exporter PDF). */
+/** Logo + navigation de pages (PDF) + actions (Annuler / Exporter Excel / Exporter PDF). */
 export function ResultHeader({
   isPdf,
   currentPageIndex,
@@ -36,6 +38,7 @@ export function ResultHeader({
   isExportingExcel,
   onExportPdf,
   isExportingPdf,
+  onCancel,
 }: ResultHeaderProps) {
   return (
     <header className="flex items-center gap-2.5 px-6 sm:gap-4 sm:px-8 shrink-0 h-14 bg-surface-page border-b border-line">
@@ -79,6 +82,16 @@ export function ResultHeader({
               <span className="h-1.5 w-1.5 rounded-full bg-action animate-pulse" />
               Transcription en cours…
             </span>
+          )}
+          {isStreaming && (
+            <button
+              type="button"
+              onClick={onCancel}
+              className="h-7 px-2.5 ml-1 rounded-sm border border-line-control bg-transparent font-sans text-xs text-ink-muted cursor-pointer"
+              title="Arrête le traitement des pages pas encore transcrites — celles déjà obtenues restent disponibles"
+            >
+              Annuler
+            </button>
           )}
         </span>
       )}
