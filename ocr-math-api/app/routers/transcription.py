@@ -23,7 +23,7 @@ from app.models.schemas import (
     PDFChunkAckResponse,
 )
 from app.security import verify_api_key
-from app.services.claude_service import call_anthropic_ocr, describe_anthropic_error
+from app.services.claude_service import call_anthropic_ocr, describe_anthropic_error, get_anthropic_semaphore
 from app.services.job_store import create_job, create_chunked_job, get_job, PDFJob
 from app.utils.errors import log_unexpected
 from app.utils.image_utils import (
@@ -56,12 +56,24 @@ async def _process_single_image(raw_bytes: bytes, media_type: str):
     qu'ils ne bloquent la boucle d'événements pendant leur exécution (impact
     direct sur les autres requêtes concurrentes, ex. le polling de statut d'un
     autre job PDF).
+
+    Le prétraitement est fait sous le même sémaphore que l'appel Claude
+    (`get_anthropic_semaphore`), mais dans une section à part, relâchée avant
+    l'appel réseau — jamais imbriquée avec l'acquisition interne de
+    `call_anthropic_ocr` (un `asyncio.Semaphore` n'est pas réentrant). Sans
+    cette borne, un lot entier de pages (`asyncio.gather`) prétraiterait
+    d'un coup, alors que seules `ANTHROPIC_CONCURRENCY` d'entre elles peuvent
+    de toute façon être envoyées à Claude en même temps : les images déjà
+    redimensionnées/encodées des pages en attente s'accumuleraient en
+    mémoire pour rien.
     """
-    raw_bytes = await asyncio.to_thread(normalize_orientation, raw_bytes, media_type)
-    raw_bytes, image_width, image_height = await asyncio.to_thread(
-        resize_for_vision, raw_bytes, media_type
-    )
-    image_b64 = await asyncio.to_thread(encode_bytes_to_base64, raw_bytes)
+    semaphore = get_anthropic_semaphore()
+    async with semaphore:
+        raw_bytes = await asyncio.to_thread(normalize_orientation, raw_bytes, media_type)
+        raw_bytes, image_width, image_height = await asyncio.to_thread(
+            resize_for_vision, raw_bytes, media_type
+        )
+        image_b64 = await asyncio.to_thread(encode_bytes_to_base64, raw_bytes)
     ocr_result = await call_anthropic_ocr(image_b64, media_type, image_width, image_height)
     return ocr_result, image_b64, image_width, image_height
 
@@ -294,17 +306,19 @@ async def _process_chunk_pages(
     une par morceau reçu, pas d'un seul `gather` englobant tout le document.
 
     La rasterisation se fait ici, en tâche de fond, plutôt que dans
-    `upload_pdf_chunk` avant de répondre au client : comme le client n'envoie
-    le morceau N+1 qu'après avoir reçu la réponse du morceau N (contrat
-    d'envoi séquentiel), tout temps de rendu passé avant cette réponse
-    ajouterait une latence pure sur un gros document (potentiellement des
-    dizaines de secondes cumulées sur des dizaines de morceaux). En la
-    déportant ici, elle se chevauche avec l'envoi du morceau suivant, comme
-    le fait déjà le traitement OCR qui suit. `upload_pdf_chunk` ne fait donc
+    `upload_pdf_chunk` avant de répondre au client : `upload_pdf_chunk` ne fait
     qu'une validation bon marché du nombre de pages (`count_pdf_pages`, qui
-    n'ouvre que la structure du PDF, sans rendu de pixel) avant de répondre.
+    n'ouvre que la structure du PDF, sans rendu de pixel) avant de répondre,
+    pour que la lecture du morceau reste rapide indépendamment du volume de
+    travail que cette tâche de fond doit ensuite abattre.
 
-    Décrémente `job.chunks_pending` et tente la finalisation du job à sa
+    `job.processing_semaphore` (acquis par `upload_pdf_chunk` avant même de
+    créer cette tâche) borne le nombre de morceaux traités en parallèle pour ce
+    job — relâché ici, dans le `finally`, une fois ce morceau terminé. Comme le
+    client envoie ses morceaux un par un en attendant la réponse de chacun,
+    relâcher cette place est ce qui débloque l'acceptation du morceau suivant.
+
+    Décrémente aussi `job.chunks_pending` et tente la finalisation du job à sa
     propre fin — voir `_maybe_finalize_job` — que la rasterisation ait réussi
     ou non, pour qu'un morceau dont le rendu échoue ne bloque jamais
     indéfiniment la finalisation du job.
@@ -343,6 +357,7 @@ async def _process_chunk_pages(
     finally:
         job.chunks_pending -= 1
         job.updated_at = time.time()
+        job.processing_semaphore.release()
         _maybe_finalize_job(job)
 
 
@@ -601,6 +616,17 @@ async def upload_pdf_chunk(
             job.upload_finalized = True
         job.chunks_pending += 1
         job.updated_at = time.time()
+
+    # Contre-pression : attend qu'une place de traitement soit libre pour CE job
+    # (`config.PDF_CHUNK_MAX_CONCURRENT_PROCESSING`, défaut 1) avant de répondre.
+    # Comme le client n'envoie le morceau suivant qu'après avoir reçu cette
+    # réponse, retarder la réponse retarde directement l'envoi du morceau
+    # suivant — sans ça, des morceaux s'accumuleraient en traitement simultané
+    # sans limite, chacun retenant en mémoire ses pages rasterisées. Hors du
+    # `async with job.lock` ci-dessus : la lecture/comptage d'un futur morceau
+    # reste possible pendant cette attente, seule la réponse au client est
+    # retardée.
+    await job.processing_semaphore.acquire()
 
     task = asyncio.create_task(
         _process_chunk_pages(job.job_id, chunk_bytes, start_page_number, page_count)

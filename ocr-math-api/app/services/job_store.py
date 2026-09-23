@@ -77,6 +77,18 @@ class PDFJob:
     # de requête FastAPI — donc toujours déjà à l'intérieur d'une boucle
     # d'événements en cours. Ne pas "corriger" ça en le rendant paresseux.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
+    # Borne le nombre de morceaux traités en parallèle pour CE job (voir
+    # config.PDF_CHUNK_MAX_CONCURRENT_PROCESSING) — acquis par `upload_pdf_chunk`
+    # avant de répondre au client, relâché par `_process_chunk_pages` à sa fin.
+    # Comme le client envoie ses morceaux strictement l'un après l'autre en
+    # attendant la réponse de chacun, retarder cette réponse retarde directement
+    # l'envoi du morceau suivant : c'est le mécanisme de contre-pression qui
+    # empêche des morceaux de s'accumuler en traitement simultané sans limite.
+    processing_semaphore: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(get_settings().PDF_CHUNK_MAX_CONCURRENT_PROCESSING),
+        repr=False,
+        compare=False,
+    )
 
 
 _jobs: dict[str, PDFJob] = {}

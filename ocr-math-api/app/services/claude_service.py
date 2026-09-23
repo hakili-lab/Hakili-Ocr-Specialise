@@ -65,6 +65,20 @@ def _get_semaphore() -> asyncio.Semaphore:
     return asyncio.Semaphore(get_settings().ANTHROPIC_CONCURRENCY)
 
 
+def get_anthropic_semaphore() -> asyncio.Semaphore:
+    """
+    Accès public à `_get_semaphore()`, pour les appelants hors de ce module qui
+    doivent borner leur propre travail à la même limite de concurrence — voir
+    `transcription.py`: `_process_single_image`, qui l'acquiert brièvement autour
+    du prétraitement d'image (avant l'appel Claude lui-même, qui acquiert la
+    même instance en interne) : sans ça, le prétraitement de tout un lot de
+    pages démarrerait d'un coup, sans lien avec ANTHROPIC_CONCURRENCY, alors
+    que seules `ANTHROPIC_CONCURRENCY` pages peuvent de toute façon être
+    envoyées à Claude en même temps.
+    """
+    return _get_semaphore()
+
+
 SYSTEM_PROMPT = (
     "Tu es un expert OCR spécialisé dans l'analyse de documents administratifs manuscrits "
     "ou imprimés (tableaux, formulaires, relevés, listes). Produis une transcription "

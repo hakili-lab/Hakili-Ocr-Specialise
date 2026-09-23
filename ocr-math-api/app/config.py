@@ -49,6 +49,16 @@ class Settings:
     # impurgeable (job_store._purge_expired_jobs ne balaie aujourd'hui que
     # done/error). Défaut : 30 min.
     JOB_STALL_TIMEOUT_SECONDS: int = int(os.getenv("JOB_STALL_TIMEOUT_SECONDS", "1800"))
+    # Nombre de morceaux d'un même job PDF chunké autorisés à rasteriser/OCRiser en
+    # parallèle (voir job_store.PDFJob.processing_semaphore) — borne l'upload du
+    # morceau suivant : POST /pdf/{job_id}/chunk ne répond qu'une fois une place
+    # libre, donc le client (envoi strictement séquentiel) n'envoie le morceau
+    # suivant qu'à ce moment-là. Un morceau (des dizaines de pages) dépasse déjà
+    # largement ANTHROPIC_CONCURRENCY en pages ; en admettre un second en parallèle
+    # n'apporte donc quasiment aucun débit supplémentaire, seulement de la mémoire
+    # de rasterisation en plus — défaut à 1 (traitement des morceaux strictement
+    # séquentiel) pour la borne mémoire la plus stricte.
+    PDF_CHUNK_MAX_CONCURRENT_PROCESSING: int = int(os.getenv("PDF_CHUNK_MAX_CONCURRENT_PROCESSING", "1"))
     # Une valeur trop basse risque de tronquer une réponse verbeuse (page avec un gros
     # tableau) avant la fin du JSON — traité comme un échec (ValueError, voir
     # claude_service.py), jamais retenté automatiquement par le retry Anthropic
