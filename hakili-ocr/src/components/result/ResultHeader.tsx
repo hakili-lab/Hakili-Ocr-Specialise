@@ -8,11 +8,21 @@ type ResultHeaderProps = {
   /**
    * Navigation uniquement parmi les pages déjà affichables (prêtes dans leur ordre d'arrivée,
    * puis les pages en échec) — voir `navPageNumbers` dans ResultScreen.tsx. Aucun compteur
-   * "page X / Y" n'est affiché : seuls les boutons précédent/suivant, activés selon ces deux
-   * drapeaux.
+   * numéro de page n'est affiché : les boutons précédent/suivant sont activés selon ces deux
+   * drapeaux, et entre eux s'affiche la progression globale "transcrites / total".
    */
   hasPrev: boolean;
   hasNext: boolean;
+  /** Pages réellement transcrites (réussies) / total du document — les échecs ne comptent pas. */
+  transcribedCount: number;
+  totalPages: number;
+  /**
+   * Numéros des pages définitivement en échec — cités dans le rectangle récapitulatif affiché
+   * une fois le traitement terminé (`isStreaming === false`) à la place du rond de progression.
+   */
+  failedPageNumbers: number[];
+  /** Fin de traitement "normale" (ni annulation ni erreur fatale, gérées par leurs propres modales). */
+  showSummary: boolean;
   /** Le document a encore des pages en cours de traitement en arrière-plan. */
   isStreaming: boolean;
   onPrevPage: () => void;
@@ -30,6 +40,10 @@ export function ResultHeader({
   isPdf,
   hasPrev,
   hasNext,
+  transcribedCount,
+  totalPages,
+  failedPageNumbers,
+  showSummary,
   isStreaming,
   onPrevPage,
   onNextPage,
@@ -40,11 +54,37 @@ export function ResultHeader({
   onCancel,
 }: ResultHeaderProps) {
   return (
-    <header className="flex items-center gap-2.5 px-6 sm:gap-4 sm:px-8 shrink-0 h-14 bg-surface-page border-b border-line">
+    <header className="relative flex items-center gap-2.5 px-6 sm:gap-4 sm:px-8 shrink-0 h-14 bg-surface-page border-b border-line">
       <img src="/hakili-mark-512.png" alt="" className="h-8 w-8 object-contain" />
       <span className="font-sans font-semibold text-base tracking-[0.08em] text-ink">HAKILI</span>
       <span className="w-px h-4 bg-line inline-block" />
       <span className="font-mono font-normal text-xs text-ink-muted">OCR</span>
+      {isPdf && (
+        <div className="hidden md:flex absolute left-1/2 top-0 h-full -translate-x-1/2 items-center pointer-events-none">
+          {isStreaming ? (
+            <ProgressRing done={transcribedCount} total={totalPages} />
+          ) : showSummary ? (
+            <div
+              role="status"
+              className="pointer-events-auto max-w-[min(34rem,40vw)] rounded-md bg-surface border border-action px-4 py-1 text-center font-sans leading-tight"
+              style={{ boxShadow: '0 0 0 3px rgb(59 130 246 / 0.12), 0 0 16px 2px rgb(59 130 246 / 0.45)' }}
+            >
+              <div className="text-xs font-medium text-ink">
+                Transcription terminée — {transcribedCount} page{transcribedCount > 1 ? 's' : ''} réussie
+                {transcribedCount > 1 ? 's' : ''} sur {totalPages}
+              </div>
+              {failedPageNumbers.length > 0 && (
+                <div
+                  className="text-[11px] text-conf-low truncate"
+                  title={`Pages non réussies : ${failedPageNumbers.join(', ')}`}
+                >
+                  Pages non réussies : {failedPageNumbers.join(', ')}
+                </div>
+              )}
+            </div>
+          ) : null}
+        </div>
+      )}
       <div className="flex-1" />
       {isPdf && (
         <span className="flex items-center gap-1.5">
@@ -123,5 +163,41 @@ export function ResultHeader({
         {isExportingPdf ? 'Génération…' : 'Exporter en PDF'}
       </button>
     </header>
+  );
+}
+
+/** Rond qui se remplit selon les pages transcrites (les échecs ne comptent pas), compteur au centre. */
+function ProgressRing({ done, total }: { done: number; total: number }) {
+  const size = 40;
+  const stroke = 3;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const ratio = total > 0 ? Math.min(1, done / total) : 0;
+  return (
+    <div
+      className="relative shrink-0"
+      style={{ width: size, height: size }}
+      title="Pages transcrites / total du document"
+      aria-label={`${done} pages transcrites sur ${total}`}
+    >
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="var(--color-line)" strokeWidth={stroke} />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="var(--color-action)"
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - ratio)}
+          style={{ transition: 'stroke-dashoffset 400ms ease-out' }}
+        />
+      </svg>
+      <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] text-ink-secondary">
+        {done}/{total}
+      </span>
+    </div>
   );
 }

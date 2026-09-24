@@ -1,19 +1,16 @@
 /**
  * components/result/JobIssuesModal.tsx
  * Modale unique couvrant les scénarios d'interruption/échec partiel d'un job PDF en
- * arrière-plan (erreur Anthropic fatale, annulation demandée, crash générique du job,
- * pages définitivement en échec) — voir `ResultScreen.tsx` pour la logique de priorité
+ * arrière-plan (erreur Anthropic fatale, annulation demandée, crash générique du job) — voir `ResultScreen.tsx` pour la logique de priorité
  * entre les variantes et le déclenchement. Un seul bouton OK : ne referme que la modale,
  * ne touche jamais aux pages déjà chargées dans `AppContext`.
  */
 import type { ReactNode } from 'react';
-import type { FailedPage } from '../../types';
 
 type JobIssuesModalProps =
   | { kind: 'fatal'; reason: string; pagesDone: number; pagesTotal: number; onAcknowledge: () => void }
   | { kind: 'cancelled'; pagesDone: number; pagesTotal: number; onAcknowledge: () => void }
-  | { kind: 'crash'; message: string; onAcknowledge: () => void }
-  | { kind: 'failed-pages'; failedPages: FailedPage[]; onAcknowledge: () => void };
+  | { kind: 'crash'; message: string; onAcknowledge: () => void };
 
 export function JobIssuesModal(props: JobIssuesModalProps) {
   let title: string;
@@ -33,20 +30,9 @@ export function JobIssuesModal(props: JobIssuesModalProps) {
         {props.pagesDone}/{props.pagesTotal} pages ont pu être transcrites avant l'annulation.
       </p>
     );
-  } else if (props.kind === 'crash') {
+  } else {
     title = 'Une erreur est survenue';
     body = <p className="font-sans text-sm text-ink-muted">{props.message}</p>;
-  } else {
-    title = props.failedPages.length > 1 ? 'Certaines pages ont échoué' : 'Une page a échoué';
-    body = (
-      <ul className="font-sans text-sm text-ink-muted space-y-1 max-h-48 overflow-y-auto list-none pl-0">
-        {props.failedPages.map((fp) => (
-          <li key={fp.page_number}>
-            Page {fp.page_number} : {fp.reason}
-          </li>
-        ))}
-      </ul>
-    );
   }
 
   return (

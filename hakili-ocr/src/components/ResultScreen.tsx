@@ -148,6 +148,11 @@ export default function ResultScreen({
       .sort((a, b) => a - b);
     return [...ready, ...failedOnly];
   })();
+  const transcribedCount = pdfResult?.pages.length ?? 0;
+  const failedPageNumbers = failedPages.map((fp) => fp.page_number).sort((a, b) => a - b);
+  // Rectangle récapitulatif de fin (voir ResultHeader) : seulement pour une fin normale — une
+  // annulation ou une erreur fatale ont leur propre modale.
+  const showSummary = isPdf && !isStreaming && fatalError === null && cancelReason === null;
   const navIndex = navPageNumbers.indexOf(pageNumber);
   const hasPrev = navIndex > 0;
   const hasNext = navIndex >= 0 ? navIndex < navPageNumbers.length - 1 : navPageNumbers.length > 0;
@@ -160,13 +165,11 @@ export default function ResultScreen({
   //    ne joue en pratique jamais, seule la clarté du code compte ici ;
   // 3) crash générique du job (`isError`, hors perte de connexion transitoire — voir
   //    `isConnectionIssue`, qui ne déclenche jamais ce modal) ;
-  // 4) liste des pages en échec, seulement une fois le job terminé (`!isStreaming`) —
-  //    tant qu'il tourne encore, d'autres pages pourraient réussir ou échouer.
+  // (La liste des pages en échec n'est plus une modale : elle est citée dans le rectangle
+  //  récapitulatif de fin du header, voir ResultHeader.tsx.)
   const showFatalModal = fatalError !== null && !hasAcknowledgedIssues;
   const showCancelledModal = !showFatalModal && cancelReason !== null && !hasAcknowledgedIssues;
   const showCrashModal = !showFatalModal && !showCancelledModal && isError && !isConnectionIssue && !hasAcknowledgedIssues;
-  const showFailedPagesModal =
-    !showFatalModal && !showCancelledModal && !showCrashModal && !isStreaming && failedPages.length > 0 && !hasAcknowledgedIssues;
   const acknowledgeIssues = () => setHasAcknowledgedIssues(true);
 
   const activeModal = showFatalModal ? (
@@ -190,8 +193,6 @@ export default function ResultScreen({
       message={error?.message ?? 'Une erreur inattendue est survenue pendant le traitement du document.'}
       onAcknowledge={acknowledgeIssues}
     />
-  ) : showFailedPagesModal ? (
-    <JobIssuesModal kind="failed-pages" failedPages={failedPages} onAcknowledge={acknowledgeIssues} />
   ) : null;
 
   // Indicateur non-bloquant pour une perte de connexion transitoire pendant le polling
@@ -272,6 +273,10 @@ export default function ResultScreen({
           isPdf={isPdf}
           hasPrev={hasPrev}
           hasNext={hasNext}
+          transcribedCount={transcribedCount}
+          totalPages={totalPages}
+          failedPageNumbers={failedPageNumbers}
+          showSummary={showSummary}
           isStreaming={isStreaming}
           onPrevPage={handlePrevPage}
           onNextPage={handleNextPage}
@@ -309,6 +314,10 @@ export default function ResultScreen({
         isPdf={isPdf}
         hasPrev={hasPrev}
         hasNext={hasNext}
+          transcribedCount={transcribedCount}
+          totalPages={totalPages}
+          failedPageNumbers={failedPageNumbers}
+          showSummary={showSummary}
         isStreaming={isStreaming}
         onPrevPage={handlePrevPage}
         onNextPage={handleNextPage}
