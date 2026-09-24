@@ -396,7 +396,11 @@ export function useTranscription(): UseTranscriptionResult {
       start,
       isPending:
         startPdfMutation.isPending ||
-        isChunkedStarting ||
+        // `isChunkedStarting` reste vrai pendant TOUT l'envoi des morceaux (la réponse au dernier
+        // est retardée par la contre-pression backend, donc presque jusqu'à la fin du job) :
+        // dès qu'une page est affichable, il ne doit plus compter comme "pending", sinon
+        // App.tsx renvoie sur 'loading' juste après le SET_RESULT et l'écran résultat n'apparaît jamais.
+        (isChunkedStarting && streamedResult === null) ||
         (pdfJobId !== null && streamedResult === null && (!jobStatus || jobStatus.status === 'processing')),
       isError: startPdfMutation.isError || jobFailed || statusQuery.isError || chunkUploadError !== null,
       error:

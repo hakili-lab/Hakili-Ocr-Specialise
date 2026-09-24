@@ -95,7 +95,11 @@ SYSTEM_PROMPT = (
     "TABLEAUX : un bloc par ligne de données, jamais un bloc pour tout le tableau. Chaque "
     "bloc-ligne répète l'en-tête + séparateur (|---|---|) suivis de sa seule ligne de données, "
     "avec son propre id, label (\"Tableau - Ligne N\"), bbox (limitée à cette ligne) et "
-    "confidence. N'ajoute PAS de colonne confiance toi-même (ajoutée automatiquement par le "
+    "confidence. LIGNES VIDES : les lignes vides (cellules toutes vides, ligne pré-imprimée "
+    "non remplie) sont IMPORTANTES et doivent être conservées — émets-les comme des blocs-lignes "
+    "à part entière, avec leur place exacte dans la séquence, leur bbox et des cellules vides "
+    "(| | | |). N'en saute aucune, ne les fusionne pas, ne renumérote pas les lignes suivantes. "
+    "N'ajoute PAS de colonne confiance toi-même (ajoutée automatiquement par le "
     "système) — ne transcris que les colonnes réellement présentes.\n\n"
     "ANNOTATION EN COULEUR DIFFÉRENTE : si une cellule porte, en plus du texte d'origine, une "
     "écriture manuscrite dans une couleur nettement différente (souvent rouge vs. texte "
@@ -260,25 +264,6 @@ def describe_anthropic_error(exc: anthropic.APIError) -> str:
     )
 
 
-def _is_blank_table_row_block(markdown: str) -> bool:
-    """
-    Un bloc-ligne de tableau (convention "un bloc par ligne" du prompt : toutes ses
-    lignes non vides commencent par '|', même définition que isTableBlockMarkdown côté
-    frontend dans tableMarkdown.ts) est considéré vide s'il n'a pas de 3e ligne (la
-    ligne de données, après en-tête + séparateur) ou si celle-ci ne contient, une fois
-    les '|' retirés, aucun caractère non-blanc (toutes les cellules sont vides).
-    Renvoie False pour un bloc non-tableau (n'importe quel autre contenu à 1 ou 2
-    lignes ne doit pas être traité comme une ligne de tableau vide).
-    """
-    lines = [line.strip() for line in markdown.split("\n") if line.strip()]
-    if len(lines) < 2 or not all(line.startswith("|") for line in lines):
-        return False
-    if len(lines) < 3:
-        return True
-    data_line = lines[2]
-    return not data_line.replace("|", "").strip()
-
-
 def parse_claude_response(text: str, image_width: int, image_height: int) -> OCRResult:
     """
     Extrait le JSON renvoyé par Claude (bbox en pixels absolus), convertit chaque bbox
@@ -294,17 +279,7 @@ def parse_claude_response(text: str, image_width: int, image_height: int) -> OCR
         logger.error("Échec du parsing JSON. Réponse brute de Claude : %s", text)
         raise ValueError("La réponse de Claude n'est pas un JSON valide.") from exc
 
-    blocks = raw_data.get("blocks", [])
-    kept_blocks = []
-    for block in blocks:
-        if _is_blank_table_row_block(block.get("markdown", "")):
-            logger.warning(
-                "Bloc-ligne de tableau vide (id=%s, label=%r) détecté et supprimé "
-                "avant envoi au frontend.", block.get("id"), block.get("label"),
-            )
-            continue
-        kept_blocks.append(block)
-    raw_data["blocks"] = kept_blocks
+    raw_data.setdefault("blocks", [])
 
     for block in raw_data["blocks"]:
         bbox = block.get("bbox", {})
