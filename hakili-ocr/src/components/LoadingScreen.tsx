@@ -17,6 +17,8 @@ import { useApp } from '../context/AppContext';
 interface LoadingScreenProps {
   isError: boolean;
   error: TranscribeError | null;
+  /** Échec total d'un job PDF (aucune page réussie) — voir `App.tsx`. */
+  jobFailureMessage?: string | null;
 }
 
 // Étapes illustratives affichées en rotation — pas un vrai suivi du backend.
@@ -56,7 +58,7 @@ function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-export default function LoadingScreen({ isError, error }: LoadingScreenProps) {
+export default function LoadingScreen({ isError, error, jobFailureMessage }: LoadingScreenProps) {
   const { dispatch } = useApp();
   const reducedMotion = usePrefersReducedMotion();
 
@@ -79,7 +81,8 @@ export default function LoadingScreen({ isError, error }: LoadingScreenProps) {
     return () => clearInterval(interval);
   }, [reducedMotion]);
 
-  if (isError && error) {
+  const errorMessage = isError && error ? error.message : jobFailureMessage ?? null;
+  if (errorMessage) {
     return (
       <div className="w-full h-full bg-surface-sunken trame-points flex flex-col items-center justify-center gap-6">
         <div className="h-16 w-16 rounded-full bg-conf-low-soft flex items-center justify-center">
@@ -90,7 +93,7 @@ export default function LoadingScreen({ isError, error }: LoadingScreenProps) {
 
         <div className="text-center">
           <h2 className="font-display font-normal text-2xl text-ink mb-2">Une erreur est survenue</h2>
-          <p className="font-sans text-base text-ink-muted max-w-md">{error.message}</p>
+          <p className="font-sans text-base text-ink-muted max-w-md">{errorMessage}</p>
         </div>
 
         <button

@@ -715,7 +715,21 @@ async def upload_pdf_chunk(
     # `async with job.lock` ci-dessus : la lecture/comptage d'un futur morceau
     # reste possible pendant cette attente, seule la réponse au client est
     # retardée.
-    await job.processing_semaphore.acquire()
+    try:
+        await job.processing_semaphore.acquire()
+    except BaseException:
+        # Requête annulée (client déconnecté) pendant l'attente : aucune tâche de fond ne
+        # sera lancée pour ce morceau, donc `chunks_pending` ne redescendrait jamais et le
+        # job resterait "processing" indéfiniment (ni TTL ni stall-timeout ne le purgent
+        # tant que `chunks_pending > 0`). On annule les incréments faits plus haut — le
+        # contrat d'envoi séquentiel garantit qu'aucun autre morceau ne s'est intercalé.
+        job.chunks_pending -= 1
+        job.pages_received -= page_count
+        job.bytes_received -= len(chunk_bytes)
+        if is_last_chunk:
+            job.upload_finalized = False
+        job.updated_at = time.time()
+        raise
 
     task = asyncio.create_task(
         _process_chunk_pages(job.job_id, chunk_bytes, start_page_number, page_count)

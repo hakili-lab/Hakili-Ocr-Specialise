@@ -63,6 +63,21 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, dispatch]);
 
+  // Échec total d'un job PDF : aucune page réussie (le garde ci-dessus laisse l'écran de
+  // chargement affiché) alors que le backend a déjà tout dit — erreur fatale, annulation,
+  // ou toutes les pages traitées et toutes en échec. Sans ce message, le spinner tournerait
+  // indéfiniment (`isError` reste faux : le statut est 200/"processing"/"done").
+  const hasNoPage = !data || ('pages' in data && data.pages.length === 0);
+  const allPagesDone = progress !== null && progress.pagesTotal > 0 && progress.pagesDone >= progress.pagesTotal;
+  let jobFailureMessage: string | null = null;
+  if (state.currentScreen === 'loading' && hasNoPage && !isError) {
+    if (fatalError) jobFailureMessage = fatalError;
+    else if (cancelReason) jobFailureMessage = cancelReason;
+    else if (failedPages.length > 0 && allPagesDone) {
+      jobFailureMessage = `Aucune page n'a pu être transcrite (${failedPages.length} en échec). ${failedPages[0].reason}`;
+    }
+  }
+
   // Bascule sur l'écran de chargement dès qu'une requête part, même si CONFIRM_UPLOAD
   // (déclenché par PreviewScreen) n'a pas encore eu le temps de le faire lui-même.
   useEffect(() => {
@@ -90,7 +105,7 @@ export default function App() {
               Annuler
             </button>
           )}
-          {state.currentScreen === 'loading' && !isError && (
+          {state.currentScreen === 'loading' && !isError && !jobFailureMessage && (
             <button
               type="button"
               onClick={() => {
@@ -124,7 +139,7 @@ export default function App() {
         )}
         {state.currentScreen === 'loading' && (
           <div className="h-full flex items-center justify-center">
-            <LoadingScreen isError={isError} error={error} />
+            <LoadingScreen isError={isError} error={error} jobFailureMessage={jobFailureMessage} />
           </div>
         )}
         {/*
