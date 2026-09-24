@@ -34,7 +34,7 @@ class Settings:
     # embarque l'image complète en base64 ; le frontend n'a plus besoin de la
     # copie backend une fois son dernier poll reçu (`refetchInterval` s'arrête
     # dès que `status !== "processing"`, voir `useTranscribe.ts`).
-    JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "300"))
+    JOB_TTL_SECONDS: int = int(os.getenv("JOB_TTL_SECONDS", "180"))
     # Intervalle (secondes) de la tâche de fond qui balaie `job_store` pour
     # purger les jobs expirés (voir job_store.purge_loop, démarrée dans
     # main.py) — en plus du balayage opportuniste existant à chaque création
