@@ -372,6 +372,8 @@ async def _process_chunk_pages(
     if job is None:
         return
     try:
+        if job.cancel_reason is not None:
+            return  # annulé avant même la rasterisation : aucun travail à faire
         try:
             page_images = await asyncio.to_thread(convert_pdf_to_images, chunk_bytes, dpi=150)
         except Exception:
@@ -394,6 +396,9 @@ async def _process_chunk_pages(
                 job.errors.append((page_number, message))
                 job.pages_done += 1
             return
+
+        if job.cancel_reason is not None:
+            return  # annulé pendant la rasterisation (thread non interruptible) : on jette le rendu
 
         await asyncio.gather(*(
             _process_page_and_track(start_page_number + i, img_bytes, job, job.results, job.warnings, job.errors)
@@ -496,6 +501,8 @@ async def start_pdf_transcription(file: UploadFile) -> PDFJobStartResponse:
     task = asyncio.create_task(_run_pdf_job(job.job_id, page_images))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+    job.tasks.add(task)
+    task.add_done_callback(job.tasks.discard)
 
     return PDFJobStartResponse(job_id=job.job_id, pages_total=job.pages_total)
 
@@ -536,7 +543,10 @@ def _build_job_status_response(job: PDFJob) -> PDFJobStatusResponse:
     return PDFJobStatusResponse(
         job_id=job.job_id,
         status=job.status,
-        pages_done=job.pages_done,
+        # Un job annulé/terminé n'a plus de pages "en cours" : les tâches annulées n'incrémentent
+        # pas toutes `pages_done`, on force la cohérence pour que le frontend cesse d'afficher
+        # "Transcription en cours…".
+        pages_done=job.pages_total if (job.cancel_reason is not None and job.status != "processing") else job.pages_done,
         pages_total=job.pages_total,
         result=result,
         error=job.error,
@@ -555,10 +565,9 @@ async def cancel_pdf_job(job_id: str) -> PDFJobStatusResponse:
     Demande l'arrêt d'un job PDF en cours — bouton "Annuler" explicite côté frontend, ou
     appel automatique quand la fermeture de l'onglet est détectée (voir
     `apiClient.ts`: `sendKeepaliveRequest`, appelé au `pagehide`). Même mécanique que
-    `job.fatal_error` (voir `_process_page_and_track`) : les pages pas encore lancées
-    sont sautées, celles déjà en plein appel réseau se terminent normalement — pas
-    d'annulation de tâche asyncio en vol, pour rester cohérent avec le choix déjà fait
-    pour les erreurs fatales.
+    `job.fatal_error`, mais l'annulation est DURE : les tâches de fond du job
+    (`job.tasks`) sont annulées, y compris les appels Anthropic déjà en vol (requête HTTP
+    fermée), et plus aucun morceau n'est accepté.
 
     Idempotent et sans effet sur un job déjà terminé ou déjà annulé/fatal — annuler
     plusieurs fois, ou annuler un job qui vient de se terminer entretemps, ne lève
@@ -570,6 +579,20 @@ async def cancel_pdf_job(job_id: str) -> PDFJobStatusResponse:
     if job.status == "processing" and job.cancel_reason is None and job.fatal_error is None:
         job.cancel_reason = "Transcription annulée."
         job.updated_at = time.time()
+        # Annulation DURE : chaque tâche de fond du job est annulée, ce qui propage
+        # CancelledError jusqu'aux appels `client.messages.create` déjà en vol (la requête HTTP
+        # vers Anthropic est fermée) et libère les sémaphores via leurs `async with`/`finally`.
+        for task in list(job.tasks):
+            task.cancel()
+        if job.pages_expected is None:
+            # Job legacy : `_run_pdf_job` ne finalise pas sur annulation — on le fait ici.
+            _finalize_pdf_job(job, job.results, job.warnings, job.errors)
+        else:
+            # Job chunké : plus aucun morceau ne sera accepté (voir `upload_pdf_chunk`) ; la
+            # finalisation se fait quand les tâches annulées ont fini leur `finally`
+            # (`chunks_pending == 0`) — ou tout de suite s'il n'y en a aucune en vol.
+            job.upload_finalized = True
+            _maybe_finalize_job(job)
     return _build_job_status_response(job)
 
 
@@ -653,7 +676,7 @@ async def upload_pdf_chunk(
             status_code=status.HTTP_409_CONFLICT,
             detail="Ce job n'a pas été ouvert en mode upload par morceaux.",
         )
-    if job.status != "processing" or job.upload_finalized:
+    if job.cancel_reason is not None or job.status != "processing" or job.upload_finalized:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Ce job n'accepte plus de nouveaux morceaux.",
@@ -731,10 +754,19 @@ async def upload_pdf_chunk(
         job.updated_at = time.time()
         raise
 
+    if job.cancel_reason is not None:
+        # Annulé pendant l'attente de la place de traitement : ne lance rien.
+        job.processing_semaphore.release()
+        job.chunks_pending -= 1
+        _maybe_finalize_job(job)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Transcription annulée.")
+
     task = asyncio.create_task(
         _process_chunk_pages(job.job_id, chunk_bytes, start_page_number, page_count)
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+    job.tasks.add(task)
+    task.add_done_callback(job.tasks.discard)
 
     return PDFChunkAckResponse(job_id=job.job_id, pages_received=job.pages_received, status=job.status)

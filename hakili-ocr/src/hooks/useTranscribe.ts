@@ -146,11 +146,16 @@ async function startPdfJobChunked(pagesExpected: number): Promise<PdfJobStartRes
  * envoyés strictement l'un après l'autre (voir la boucle séquentielle dans `startPdfChunkedFlow`
  * ci-dessous) — le backend numérote lui-même les pages à réception, dans l'ordre d'arrivée.
  */
-async function uploadPdfChunk(jobId: string, chunkBlob: Blob, isLastChunk: boolean): Promise<PdfChunkAckResponse> {
+async function uploadPdfChunk(
+  jobId: string,
+  chunkBlob: Blob,
+  isLastChunk: boolean,
+  signal?: AbortSignal
+): Promise<PdfChunkAckResponse> {
   const formData = new FormData();
   formData.append('file', chunkBlob, 'chunk.pdf');
   formData.append('is_last_chunk', String(isLastChunk));
-  return fetchApi<PdfChunkAckResponse>(`/transcribe/pdf/${jobId}/chunk`, { method: 'POST', body: formData });
+  return fetchApi<PdfChunkAckResponse>(`/transcribe/pdf/${jobId}/chunk`, { method: 'POST', body: formData, signal });
 }
 
 /** Progression réelle page par page d'un job PDF, telle qu'exposée par `UseTranscriptionResult.progress`. */
@@ -258,7 +263,12 @@ export function useTranscription(): UseTranscriptionResult {
     return () => window.removeEventListener('pagehide', handlePageHide);
   }, []);
 
+  // Contrôleur de la boucle d'envoi des morceaux (flux chunké) : annulé par `cancel` pour que le
+  // frontend cesse immédiatement d'envoyer de nouveaux morceaux (et coupe celui en cours d'upload).
+  const chunkAbortRef = useRef<AbortController | null>(null);
+
   const cancel = useCallback(() => {
+    chunkAbortRef.current?.abort();
     const jobId = pdfJobIdRef.current;
     if (!jobId) return;
     cancelPdfJob(jobId)
@@ -317,19 +327,30 @@ export function useTranscription(): UseTranscriptionResult {
       return;
     }
 
+    chunkAbortRef.current?.abort();
+    const controller = new AbortController();
+    chunkAbortRef.current = controller;
     setIsChunkedStarting(true);
     try {
       const jobStart = await startPdfJobChunked(pageCount);
       setPdfJobId(jobStart.job_id);
+      // Annulé pendant l'ouverture du job : le `cancel` n'avait pas encore de job_id à annuler.
+      if (controller.signal.aborted) {
+        cancelPdfJob(jobStart.job_id).catch(() => {});
+        return;
+      }
 
       // Réutilise `doc` (déjà chargé par loadPdf ci-dessus) au lieu de reparser `file` — un
       // PDF de plusieurs centaines de pages ne doit être parsé qu'une seule fois.
       const chunks = await splitLoadedPdfIntoChunks(doc, PDF_CHUNK_SIZE_PAGES);
       for (let i = 0; i < chunks.length; i++) {
+        if (controller.signal.aborted) break;
         const isLastChunk = i === chunks.length - 1;
-        await uploadPdfChunk(jobStart.job_id, chunks[i].blob, isLastChunk);
+        await uploadPdfChunk(jobStart.job_id, chunks[i].blob, isLastChunk, controller.signal);
       }
     } catch (err) {
+      // Annulation volontaire : ni erreur affichée, ni message — le backend est déjà en train de s'arrêter.
+      if (controller.signal.aborted) return;
       setChunkUploadError(
         err instanceof TranscribeError
           ? err
@@ -345,6 +366,7 @@ export function useTranscription(): UseTranscriptionResult {
     setPdfJobId(null);
     setMockPdfResult(null);
     setChunkUploadError(null);
+    chunkAbortRef.current?.abort();
     imageMutation.reset();
     startPdfMutation.reset();
 

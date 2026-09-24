@@ -5,15 +5,14 @@
  */
 type ResultHeaderProps = {
   isPdf: boolean;
-  currentPageIndex: number;
   /**
-   * Nombre total de pages du document — borne la navigation dans les deux sens.
-   * Naviguer vers une page pas encore transcrite est autorisé (voir ResultScreen.tsx,
-   * qui affiche un placeholder "en cours" dans ce cas) : les pages peuvent finir dans
-   * n'importe quel ordre, donc ce n'est plus le nombre de pages déjà chargées qui doit
-   * borner le bouton "suivant".
+   * Navigation uniquement parmi les pages déjà affichables (prêtes dans leur ordre d'arrivée,
+   * puis les pages en échec) — voir `navPageNumbers` dans ResultScreen.tsx. Aucun compteur
+   * "page X / Y" n'est affiché : seuls les boutons précédent/suivant, activés selon ces deux
+   * drapeaux.
    */
-  totalPages: number;
+  hasPrev: boolean;
+  hasNext: boolean;
   /** Le document a encore des pages en cours de traitement en arrière-plan. */
   isStreaming: boolean;
   onPrevPage: () => void;
@@ -29,8 +28,8 @@ type ResultHeaderProps = {
 /** Logo + navigation de pages (PDF) + actions (Annuler / Exporter Excel / Exporter PDF). */
 export function ResultHeader({
   isPdf,
-  currentPageIndex,
-  totalPages,
+  hasPrev,
+  hasNext,
   isStreaming,
   onPrevPage,
   onNextPage,
@@ -52,7 +51,7 @@ export function ResultHeader({
           <button
             type="button"
             onClick={onPrevPage}
-            disabled={currentPageIndex === 0}
+            disabled={!hasPrev}
             className="flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed bg-transparent border-0 p-1"
             aria-label="Page précédente"
           >
@@ -60,13 +59,10 @@ export function ResultHeader({
               <path d="M15 18l-6-6 6-6" />
             </svg>
           </button>
-          <span className="font-mono text-sm text-ink-secondary">
-            {currentPageIndex + 1} / {totalPages}
-          </span>
           <button
             type="button"
             onClick={onNextPage}
-            disabled={currentPageIndex === totalPages - 1}
+            disabled={!hasNext}
             className="flex items-center justify-center cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed bg-transparent border-0 p-1"
             aria-label="Page suivante"
           >

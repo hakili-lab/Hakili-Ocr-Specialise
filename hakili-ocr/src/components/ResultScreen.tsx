@@ -134,6 +134,23 @@ export default function ResultScreen({
   // jamais un index dans `pdfResult.pages` — pas besoin de le retrouver via une recherche.
   const pageNumber = currentPageIndex + 1;
 
+  // Ordre de navigation : pages prêtes dans leur ORDRE D'ARRIVÉE (`pdfResult.pages` n'est jamais
+  // retrié après le premier lot, voir MERGE_PDF_RESULT — ex. 1 puis 7, la page 2 arrivée plus tard
+  // vient après 7), suivies des pages en échec (par numéro), avec leur message. Les pages pas encore
+  // traitées ne sont pas navigables : pas de placeholder "en attente" à rejoindre en arrière.
+  const navPageNumbers = (() => {
+    if (!pdfResult) return [] as number[];
+    const ready = pdfResult.pages.map((p) => p.page_number);
+    const readySet = new Set(ready);
+    const failedOnly = failedPages
+      .map((fp) => fp.page_number)
+      .filter((n, i, arr) => !readySet.has(n) && arr.indexOf(n) === i)
+      .sort((a, b) => a - b);
+    return [...ready, ...failedOnly];
+  })();
+  const navIndex = navPageNumbers.indexOf(pageNumber);
+  const hasPrev = navIndex > 0;
+  const hasNext = navIndex >= 0 ? navIndex < navPageNumbers.length - 1 : navPageNumbers.length > 0;
   // Priorité d'affichage entre les 4 scénarios d'incident (un seul modal à la fois) :
   // 1) erreur fatale — peut survenir alors que le job tourne encore (pages en vol qui
   //    continuent), donc affichée dès qu'elle est connue, sans attendre la fin du job ;
@@ -233,15 +250,11 @@ export default function ResultScreen({
   };
 
   const handlePrevPage = () => {
-    if (currentPageIndex > 0) {
-      dispatch({ type: 'SET_PAGE', pageNumber: currentPageIndex });
-    }
+    if (hasPrev) dispatch({ type: 'SET_PAGE', pageNumber: navPageNumbers[navIndex - 1] });
   };
 
   const handleNextPage = () => {
-    if (currentPageIndex < totalPages - 1) {
-      dispatch({ type: 'SET_PAGE', pageNumber: currentPageIndex + 2 });
-    }
+    if (hasNext) dispatch({ type: 'SET_PAGE', pageNumber: navPageNumbers[navIndex + 1] });
   };
 
   if (!transcriptionResult) {
@@ -257,8 +270,8 @@ export default function ResultScreen({
       <div className="h-full w-full flex flex-col">
         <ResultHeader
           isPdf={isPdf}
-          currentPageIndex={currentPageIndex}
-          totalPages={totalPages}
+          hasPrev={hasPrev}
+          hasNext={hasNext}
           isStreaming={isStreaming}
           onPrevPage={handlePrevPage}
           onNextPage={handleNextPage}
@@ -294,8 +307,8 @@ export default function ResultScreen({
     <div className="h-full w-full flex flex-col">
       <ResultHeader
         isPdf={isPdf}
-        currentPageIndex={currentPageIndex}
-        totalPages={totalPages}
+        hasPrev={hasPrev}
+        hasNext={hasNext}
         isStreaming={isStreaming}
         onPrevPage={handlePrevPage}
         onNextPage={handleNextPage}

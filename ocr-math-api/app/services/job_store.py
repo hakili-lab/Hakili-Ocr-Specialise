@@ -44,6 +44,11 @@ class PDFJob:
     # terminent normalement. Un seul des deux champs suffit à interrompre le job ; les deux
     # sont distincts pour que le frontend affiche un message adapté à la cause réelle.
     cancel_reason: Optional[str] = None
+    # Tâches asyncio de fond en vol pour CE job (traitement des morceaux / job legacy) — permet
+    # à POST /pdf/{job_id}/cancel de les ANNULER réellement (y compris les appels Anthropic déjà
+    # lancés : l'annulation de la tâche coupe la requête HTTP en cours) au lieu de seulement
+    # empêcher les pages suivantes de démarrer.
+    tasks: set = field(default_factory=set, repr=False, compare=False)
     created_at: float = field(default_factory=time.time)
 
     # --- Champs utilisés uniquement par un job "chunké" (upload par morceaux,
